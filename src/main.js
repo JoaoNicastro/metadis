@@ -15,6 +15,14 @@ function setStatus(text) {
   if (el) el.textContent = text;
 }
 
+function getFilename(url) {
+  try {
+    return new URL(url, window.location.href).pathname.split('/').pop() || url;
+  } catch {
+    return url.split('/').pop().split('?')[0];
+  }
+}
+
 async function boot() {
   const container = document.getElementById('app');
   if (!container) {
@@ -29,11 +37,17 @@ async function boot() {
   const url = getModelUrl();
   try {
     await viewer.loadModel(url);
-    setStatus(`model: ${url.split('/').pop()}`);
+    setStatus(`model: ${getFilename(url)}`);
   } catch (err) {
     console.warn('failed to load model, showing fallback cube', err);
-    viewer.loadFallbackCube();
-    setStatus(`fallback (failed: ${url.split('/').pop()})`);
+    try {
+      viewer.loadFallbackCube();
+      setStatus(`fallback (failed: ${getFilename(url)})`);
+    } catch (fbErr) {
+      console.error('WebGL context unavailable', fbErr);
+      setStatus('error: WebGL unavailable');
+      return;
+    }
   }
 
   const input = createInput({
@@ -50,18 +64,44 @@ async function boot() {
   input.attach();
 
   let last = performance.now();
+  let animId = null;
+
   function tick(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     const model = viewer.getModel();
     if (model) physics.step(dt, model);
     viewer.render();
-    requestAnimationFrame(tick);
+    animId = requestAnimationFrame(tick);
   }
-  requestAnimationFrame(tick);
 
-  window.addEventListener('pause', () => setStatus('paused'));
-  window.addEventListener('resume', () => setStatus('resumed'));
+  function startLoop() {
+    if (animId !== null) return;
+    last = performance.now();
+    animId = requestAnimationFrame(tick);
+  }
+
+  function stopLoop() {
+    if (animId !== null) {
+      cancelAnimationFrame(animId);
+      animId = null;
+    }
+  }
+
+  startLoop();
+
+  window.addEventListener('pause', () => {
+    stopLoop();
+    setStatus('paused');
+  });
+  window.addEventListener('resume', () => {
+    startLoop();
+    setStatus('resumed');
+  });
+  window.addEventListener('stop', () => {
+    stopLoop();
+    setStatus('stopped');
+  });
 }
 
 boot();

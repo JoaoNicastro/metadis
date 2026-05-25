@@ -934,33 +934,34 @@ EOF
 
 ## Task 7: Fallback `.glb` embutido
 
-Modelo livre, pequeno, com geometria interessante. Khronos `DamagedHelmet` é o de facto pra GLTF — mas tem ~3.7MB de texturas. Pra app menor, usar `BoomBox` (~1.5MB) ou um cubo simples convertido pra .glb. Vou pegar o `BoomBox` que é compacto e referência boa.
+Modelo livre, mínimo, só pra validar o GLTFLoader. Tentamos `BoomBox` (~10MB com texturas atualizadas em 2026) e `Avocado` (~7.7MB), ambos viraram pesados depois do Khronos refazer texturas. Pra fallback embutido (carregado em todo cold start), o melhor compromisso é `Box.glb` (~1.6KB): texturado, valida o caminho do loader, instantâneo. Se quiser modelo "real" pra demo, passe `?model=` apontando pra uma URL HTTPS própria.
 
 **Files:**
 - Create: `public/fallback.glb`
 
-- [ ] **Step 7.1: Baixar BoomBox.glb dos sample assets oficiais do Khronos**
+- [ ] **Step 7.1: Baixar Box.glb dos sample assets oficiais do Khronos**
 
 ```bash
 mkdir -p public
 curl -L -o public/fallback.glb \
-  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/BoomBox/glTF-Binary/BoomBox.glb
+  https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Box/glTF-Binary/Box.glb
 ```
 
 Confirmar tamanho:
 ```bash
 ls -lh public/fallback.glb
 ```
-Expected: arquivo entre 1MB e 2MB.
+Expected: ~1.6KB (Box é geometry-only).
 
 - [ ] **Step 7.2: Commit**
 
 ```bash
 git add public/fallback.glb
 git commit -m "$(cat <<'EOF'
-feat: bundle Khronos BoomBox.glb as fallback model
+feat: bundle Khronos Box.glb as fallback model
 
 License: CC-BY 4.0 / public sample assets from KhronosGroup/glTF-Sample-Assets.
+Chosen as the smallest valid binary glTF (~1.6KB) — fast cold start.
 
 Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
 EOF
@@ -1052,7 +1053,7 @@ boot();
 npm run dev
 ```
 Esperado: servidor sobe em `http://localhost:5173/`. Abrir no browser, ver:
-- O BoomBox carregado, centralizado, parado.
+- O Box carregado, centralizado, parado.
 - Setas do teclado giram o modelo (com inércia).
 - Enter reseta o ângulo.
 - Escape alterna spin contínuo / damping.
@@ -1065,7 +1066,7 @@ Parar com Ctrl+C.
 
 - [ ] **Step 8.3: Confirmar via query param**
 
-Re-rodar `npm run dev`, abrir `http://localhost:5173/?model=https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Avocado/glTF-Binary/Avocado.glb` — deve carregar um abacate em vez do BoomBox.
+Re-rodar `npm run dev`, abrir `http://localhost:5173/?model=https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/main/Models/Avocado/glTF-Binary/Avocado.glb` — deve carregar um abacate em vez do Box.
 
 Parar com Ctrl+C.
 
@@ -1164,7 +1165,7 @@ Cada impulso adiciona `IMPULSE_PER_TAP = 2.5 rad/s` ao eixo correspondente. A ve
 - `src/physics.js` — angular velocity, applyImpulse, step, damping (módulo puro)
 - `src/input.js` — keydown → callbacks
 - `src/main.js` — bootstrap e cola
-- `public/fallback.glb` — modelo default (Khronos BoomBox)
+- `public/fallback.glb` — modelo default (Khronos Box, ~1.6KB)
 
 ## Spec e plano
 
@@ -1202,7 +1203,7 @@ Expected: termina sem erro, gera `dist/index.html`, `dist/assets/*.js`, copia `d
 ```bash
 npm run preview
 ```
-Esperado: serve `dist/` em `http://localhost:4173/`. Abrir, confirmar que o BoomBox carrega e setas funcionam. Esse é o build que vai pro Vercel — se funciona aqui, funciona no deploy.
+Esperado: serve `dist/` em `http://localhost:4173/`. Abrir, confirmar que o Box carrega e setas funcionam. Esse é o build que vai pro Vercel — se funciona aqui, funciona no deploy.
 
 Parar com Ctrl+C.
 

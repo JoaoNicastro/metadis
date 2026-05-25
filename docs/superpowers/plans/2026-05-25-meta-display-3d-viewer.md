@@ -6,7 +6,7 @@
 
 **Architecture:** Vite + Three.js + JS vanilla. Quatro módulos com responsabilidades isoladas: `viewer.js` (renderização), `physics.js` (modelo físico puro, testável), `input.js` (keyboard listeners), `main.js` (cola). Spike inicial valida WebGL e mapeamento de teclas no device antes de fechar escopo.
 
-**Tech Stack:** Node 20+, Vite 5, Three.js (>=0.160), Vitest pra unit tests, GLTFLoader pra `.glb`. Deploy estático no Vercel.
+**Tech Stack:** Node 20+, Vite (≥5; instala como 8.x na prática), Three.js (≥0.160), Vitest pra unit tests, GLTFLoader pra `.glb`. Deploy estático no Vercel.
 
 **Spec de origem:** [docs/superpowers/specs/2026-05-25-meta-display-3d-viewer-design.md](../specs/2026-05-25-meta-display-3d-viewer-design.md)
 

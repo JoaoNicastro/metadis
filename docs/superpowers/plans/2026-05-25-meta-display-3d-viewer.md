@@ -827,18 +827,21 @@ export function createViewer(container) {
   let currentModel = null;
 
   function fitObjectToView(object3D) {
+    // Normalize to identity transform before measuring so the box reflects local geometry.
+    object3D.position.set(0, 0, 0);
+    object3D.scale.set(1, 1, 1);
+
     const box = new THREE.Box3().setFromObject(object3D);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
-
-    object3D.position.x -= center.x;
-    object3D.position.y -= center.y;
-    object3D.position.z -= center.z;
 
     const maxDim = Math.max(size.x, size.y, size.z) || 1;
     const targetSize = 1.6;
     const scale = targetSize / maxDim;
     object3D.scale.setScalar(scale);
+
+    // World centroid after scaling is scale * center_local. Translate by -scale*center to land on origin.
+    object3D.position.set(-center.x * scale, -center.y * scale, -center.z * scale);
   }
 
   function setCurrentModel(object3D) {

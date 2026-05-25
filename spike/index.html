@@ -68,7 +68,7 @@
       let fpsLastReport = last;
 
       function tick(now) {
-        const dt = (now - last) / 1000;
+        const dt = Math.min((now - last) / 1000, 0.05);
         last = now;
         cube.rotation.x += 0.6 * dt;
         cube.rotation.y += 0.8 * dt;

@@ -1,8 +1,15 @@
 import { createViewer } from './viewer.js';
 import { createPhysics } from './physics.js';
 import { createInput } from './input.js';
+import { createImu } from './imu.js';
 
 const IMPULSE_PER_TAP = 2.5;
+const DOUBLE_TAP_MS = 400;
+
+function getQueryFlag(name) {
+  const v = new URLSearchParams(window.location.search).get(name);
+  return v != null && v !== 'false' && v !== '0';
+}
 
 function getModelUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -32,6 +39,7 @@ async function boot() {
 
   const viewer = createViewer(container);
   const physics = createPhysics();
+  const imu = createImu();
 
   setStatus('loading model...');
   const url = getModelUrl();
@@ -50,16 +58,69 @@ async function boot() {
     }
   }
 
+  // Enable head IMU by default unless ?imu=off. The Meta Display Web App
+  // runtime doesn't expose Neural Band's twist gesture (system-reserved for
+  // volume), so head tilt is the closest continuous-control equivalent.
+  const imuEnabledByQuery = !getQueryFlag('imu') || (new URLSearchParams(window.location.search).get('imu') !== 'off');
+  let imuOn = false;
+  if (imuEnabledByQuery) {
+    imuOn = await imu.enable();
+    if (imuOn) console.info('IMU enabled — head tilt → model rotation');
+    else console.warn('IMU unavailable on this platform');
+  }
+
+  // Detect double-pinch on Enter for IMU recalibrate (snap head-zero to
+  // current pose). Single Enter still resets physics rotation+velocity.
+  let lastEnter = 0;
+  function onSelect() {
+    const now = performance.now();
+    if (now - lastEnter < DOUBLE_TAP_MS) {
+      // Double-pinch: recalibrate IMU zero or toggle IMU if not enabled.
+      if (imu.isEnabled()) {
+        imu.recalibrate();
+        setStatus('imu: recalibrated');
+      } else {
+        imu.enable().then(ok => {
+          imuOn = ok;
+          setStatus(`imu: ${ok ? 'on' : 'unavailable'}`);
+        });
+      }
+      lastEnter = 0; // consume — don't also trigger reset
+      return;
+    }
+    lastEnter = now;
+    physics.reset(viewer.getModel());
+  }
+
+  // Detect double-back to toggle IMU off (in case user is getting dizzy).
+  let lastBack = 0;
+  function onBack() {
+    const now = performance.now();
+    if (now - lastBack < DOUBLE_TAP_MS) {
+      // Double-back: toggle IMU.
+      if (imu.isEnabled()) {
+        imu.disable();
+        setStatus('imu: off');
+      } else {
+        imu.enable().then(ok => {
+          setStatus(`imu: ${ok ? 'on' : 'unavailable'}`);
+        });
+      }
+      lastBack = 0;
+      return;
+    }
+    lastBack = now;
+    const continuous = physics.toggleContinuous();
+    setStatus(`spin: ${continuous ? 'continuous' : 'damped'}`);
+  }
+
   const input = createInput({
     onLeft: () => physics.applyImpulse('y', +IMPULSE_PER_TAP),
     onRight: () => physics.applyImpulse('y', -IMPULSE_PER_TAP),
     onUp: () => physics.applyImpulse('x', +IMPULSE_PER_TAP),
     onDown: () => physics.applyImpulse('x', -IMPULSE_PER_TAP),
-    onSelect: () => physics.reset(viewer.getModel()),
-    onBack: () => {
-      const continuous = physics.toggleContinuous();
-      setStatus(`spin: ${continuous ? 'continuous' : 'damped'}`);
-    },
+    onSelect,
+    onBack,
   });
   input.attach();
 
@@ -70,7 +131,10 @@ async function boot() {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     const model = viewer.getModel();
-    if (model) physics.step(dt, model);
+    if (model) {
+      physics.step(dt, model);
+      imu.step(dt, model);
+    }
     viewer.render();
     animId = requestAnimationFrame(tick);
   }

@@ -63,6 +63,23 @@
       window.addEventListener('resume', () => pushLine('event:resume'));
       window.addEventListener('stop', () => pushLine('event:stop'));
 
+      // DeviceOrientation: confirm IMU fires on Meta Display. Throttle to once
+      // every 250ms so we don't blow up the log.
+      let lastImuLog = 0;
+      const ReqPerm = window.DeviceOrientationEvent && window.DeviceOrientationEvent.requestPermission;
+      if (typeof ReqPerm === 'function') {
+        ReqPerm().then(r => pushLine(`imu perm: ${r}`)).catch(e => pushLine(`imu perm err: ${e}`));
+      }
+      window.addEventListener('deviceorientation', (e) => {
+        const now = performance.now();
+        if (now - lastImuLog < 250) return;
+        lastImuLog = now;
+        const a = e.alpha == null ? 'null' : e.alpha.toFixed(1);
+        const b = e.beta == null ? 'null' : e.beta.toFixed(1);
+        const g = e.gamma == null ? 'null' : e.gamma.toFixed(1);
+        pushLine(`imu α=${a} β=${b} γ=${g}`);
+      });
+
       let last = performance.now();
       let frames = 0;
       let fpsLastReport = last;

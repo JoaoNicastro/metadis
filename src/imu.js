@@ -27,8 +27,14 @@
 const DEG = Math.PI / 180;
 
 // How much the smoothed value moves toward each new raw reading per event.
-// 0.15 = ~85% retention; new readings have to be consistent to win.
-const SMOOTHING_ALPHA = 0.15;
+// NORMAL_ALPHA (0.15) → ~85% retention; readings must be consistent to win.
+//   Used for "bias mode" (continuous step into rotation) where jitter is the
+//   enemy — too much noise = unstable bias direction.
+// FAST_ALPHA (0.4) → ~60% retention; much more responsive.
+//   Used during grab where 1:1 wrist→cube mapping is wanted and lag is the
+//   enemy. The user is actively driving the input so a little jitter is fine.
+const NORMAL_ALPHA = 0.15;
+const FAST_ALPHA = 0.4;
 
 // Dead zone (degrees). Below this, no rotation. Big enough to swallow
 // wrist micro-tremor and IMU noise at rest. Set high — these wrist IMUs
@@ -41,9 +47,10 @@ const TILT_GAIN = 0.6;
 
 export function createImu() {
   let enabled = false;
-  let zero = null;     // { alpha, beta, gamma } — calibrated reference
-  let smoothed = null; // EMA of recent readings
+  let zero = null;       // { alpha, beta, gamma } — calibrated reference
+  let smoothed = null;   // EMA of recent readings
   let latestRaw = null;
+  let smoothingAlpha = NORMAL_ALPHA; // EMA coefficient — flipped by setFastMode
 
   function applyDeadZone(deg) {
     if (Math.abs(deg) < DEAD_ZONE_DEG) return 0;
@@ -53,9 +60,9 @@ export function createImu() {
   function emaUpdate(prev, next) {
     if (prev == null) return next;
     return {
-      alpha: prev.alpha + SMOOTHING_ALPHA * (next.alpha - prev.alpha),
-      beta: prev.beta + SMOOTHING_ALPHA * (next.beta - prev.beta),
-      gamma: prev.gamma + SMOOTHING_ALPHA * (next.gamma - prev.gamma),
+      alpha: prev.alpha + smoothingAlpha * (next.alpha - prev.alpha),
+      beta: prev.beta + smoothingAlpha * (next.beta - prev.beta),
+      gamma: prev.gamma + smoothingAlpha * (next.gamma - prev.gamma),
     };
   }
 
@@ -107,6 +114,18 @@ export function createImu() {
     return enabled;
   }
 
+  function setFastMode(fast) {
+    smoothingAlpha = fast ? FAST_ALPHA : NORMAL_ALPHA;
+  }
+
+  // Smoothed orientation in degrees (no dead zone, no gain). null until the
+  // first event lands. Used by grab.js to read pose at grab-toggle time and
+  // each frame thereafter.
+  function getReading() {
+    if (!smoothed) return null;
+    return { alpha: smoothed.alpha, beta: smoothed.beta, gamma: smoothed.gamma };
+  }
+
   function getDelta() {
     if (!smoothed || !zero) return null;
     return {
@@ -132,6 +151,8 @@ export function createImu() {
     disable,
     recalibrate,
     isEnabled,
+    setFastMode,
+    getReading,
     getDelta,
     step,
   };

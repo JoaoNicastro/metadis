@@ -125,4 +125,53 @@ describe('imu', () => {
     imu.step(1, obj);
     expect(obj.rotation).toEqual({ x: 0, y: 0, z: 0 });
   });
+
+  it('getReading() returns null before any event', () => {
+    expect(imu.getReading()).toBeNull();
+  });
+
+  it('getReading() returns smoothed pose in degrees (no dead zone, no gain)', () => {
+    settleTo(45, 30, 20);
+    const r = imu.getReading();
+    expect(r.alpha).toBeCloseTo(45, 1);
+    expect(r.beta).toBeCloseTo(30, 1);
+    expect(r.gamma).toBeCloseTo(20, 1);
+  });
+
+  it('setFastMode(true) accelerates EMA convergence', () => {
+    const normal = createImu();
+    const fast = createImu();
+    return Promise.all([normal.enable(), fast.enable()]).then(() => {
+      fast.setFastMode(true);
+      // Both establish zero at (0,0,0).
+      const dispatchTo = (target) => {
+        // Send a single big delta and read the smoothed value.
+        // We need separate event paths per IMU — both listen to the same
+        // window, so they both receive the same event. We'll fire one
+        // event and check that fast has converged more than normal.
+      };
+      // Single big spike with both listening to same event.
+      fireOrientation(0, 0, 0); // establishes zero in both
+      fireOrientation(100, 0, 0); // single spike
+      const rNormal = normal.getReading();
+      const rFast = fast.getReading();
+      // After zero(0)+spike(100): smoothed = 0 + alpha*(100-0) = 100*alpha.
+      // Normal: 0.15 * 100 = 15. Fast: 0.4 * 100 = 40.
+      expect(rFast.alpha).toBeGreaterThan(rNormal.alpha);
+      expect(rFast.alpha).toBeCloseTo(40, 0);
+      expect(rNormal.alpha).toBeCloseTo(15, 0);
+      normal.disable();
+      fast.disable();
+    });
+  });
+
+  it('setFastMode(false) restores normal smoothing', () => {
+    imu.setFastMode(true);
+    fireOrientation(0, 0, 0);
+    imu.setFastMode(false);
+    fireOrientation(100, 0, 0);
+    const r = imu.getReading();
+    // After zero+spike with NORMAL_ALPHA=0.15: 0.15 * 100 = 15.
+    expect(r.alpha).toBeCloseTo(15, 0);
+  });
 });

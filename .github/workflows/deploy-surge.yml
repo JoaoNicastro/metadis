@@ -28,8 +28,12 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
+      # Using `npm install` instead of `npm ci` because the lock file is
+      # generated on macOS and is missing Linux-only transitive deps
+      # (@emnapi/core etc). `npm install` reconciles those without failing.
+      # Determinism loss is acceptable for a 3-dep app.
       - name: Install
-        run: npm ci
+        run: npm install --no-audit --no-fund
 
       - name: Test
         run: npm test

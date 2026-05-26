@@ -5,6 +5,7 @@ import { createPhysics } from './physics.js';
 import { createInput } from './input.js';
 import { createImu } from './imu.js';
 
+const METADIS_VERSION = '1.2';
 const IMPULSE_PER_TAP = 2.5;
 const SCALE_IMPULSE = 2.5;       // exponent units per tap; 1 tap ≈ 15-20% size change before damping
 const SCALE_DAMPING = 0.985;     // matches rotation damping for consistent feel
@@ -128,6 +129,7 @@ async function setupWebXR(viewer, hooks) {
 }
 
 async function boot() {
+  console.info(`metadis v${METADIS_VERSION} — build ${new Date().toISOString().slice(0, 16)} UTC`);
   const container = document.getElementById('app');
   if (!container) {
     setStatus('error: #app not found');

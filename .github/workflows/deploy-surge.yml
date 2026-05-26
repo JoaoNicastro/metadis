@@ -1,0 +1,44 @@
+name: Deploy to Surge
+
+# Runs on every push to main. Builds the Vite bundle and publishes it to
+# metadis.surge.sh non-interactively using the SURGE_LOGIN / SURGE_TOKEN
+# repo secrets. Tests are run as a hard gate first — a red test cancels
+# the deploy so the device never picks up a broken HUD.
+#
+# Manual trigger (workflow_dispatch) lets you redeploy without a commit,
+# useful if surge's CDN ever needs a kick.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: surge-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to Surge
+        env:
+          SURGE_LOGIN: ${{ secrets.SURGE_LOGIN }}
+          SURGE_TOKEN: ${{ secrets.SURGE_TOKEN }}
+        run: npx --yes surge dist/ metadis.surge.sh

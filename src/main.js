@@ -62,12 +62,19 @@ async function boot() {
   const model = viewer.getModel();
   const baseScale = model ? model.scale.x : 1;
 
-  // Two interaction modes:
-  //   rotate — arrows = angular impulse; IMU bias also applies; default.
+  // Three interaction modes (cycle with single Back):
+  //   rotate — arrows = angular impulse; IMU bias applies to model; default.
   //   zoom   — Up/Down = scale impulse; Left/Right = reset zoom; IMU paused.
+  //   anchor — fake 3DoF world-lock. Model freezes in space; head rotation
+  //            moves the CAMERA (not the model), so the cube appears to stay
+  //            "out there" while you look around. Effective range ~±25°
+  //            before the cube slides past the FOV. Cannot anchor to real
+  //            surfaces (the Ray-Ban Display has no depth sensor / SLAM).
   let mode = 'rotate';
   let zoomFactor = 1;
   let zoomVel = 0;
+  const MODE_CYCLE = ['rotate', 'zoom', 'anchor'];
+  const DEG = Math.PI / 180;
 
   // IMU: opt-out via ?imu=off. Smoothed + dead-zoned in src/imu.js so it no
   // longer drives the cube around when you're holding still.
@@ -82,9 +89,9 @@ async function boot() {
   function statusForMode() {
     const m = `mode: ${mode}`;
     const imuTag = imu.isEnabled() ? '' : ' · imu:off';
-    return mode === 'zoom'
-      ? `${m}${imuTag} · ${zoomFactor.toFixed(2)}x`
-      : `${m}${imuTag}`;
+    if (mode === 'zoom') return `${m}${imuTag} · ${zoomFactor.toFixed(2)}x`;
+    if (mode === 'anchor') return `${m}${imuTag} · 3dof`;
+    return `${m}${imuTag}`;
   }
 
   function refreshStatus() {
@@ -92,12 +99,22 @@ async function boot() {
   }
 
   function setMode(next) {
+    // Leaving anchor mode: snap camera back to its default look.
+    if (mode === 'anchor' && next !== 'anchor') {
+      viewer.camera.rotation.set(0, 0, 0);
+    }
     mode = next;
     if (mode === 'zoom') {
-      // Stop any rotational momentum so zoom feels clean (visual stillness).
-      physics.reset(null); // zero velocity but keep current rotation
+      physics.reset(null); // zero rotational velocity (keep current rotation)
+    } else if (mode === 'anchor') {
+      // Recalibrate the IMU so "current head pose" becomes the world anchor
+      // direction. The model + camera both center; user can look ±25° to
+      // see the model "stay" in that direction.
+      physics.reset(viewer.getModel());
+      zoomVel = 0;
+      if (imu.isEnabled()) imu.recalibrate();
+      else imu.enable();
     } else {
-      // Returning to rotate: keep current zoom in place; user can reset later.
       zoomVel = 0;
     }
     refreshStatus();
@@ -153,25 +170,29 @@ async function boot() {
       return;
     }
     lastBack = now;
-    setMode(mode === 'rotate' ? 'zoom' : 'rotate');
+    const next = MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length];
+    setMode(next);
   }
 
   const input = createInput({
     onLeft: () => {
       if (mode === 'rotate') physics.applyImpulse('y', +IMPULSE_PER_TAP);
-      else resetZoom();
+      else if (mode === 'zoom') resetZoom();
+      else if (mode === 'anchor' && imu.isEnabled()) imu.recalibrate();
     },
     onRight: () => {
       if (mode === 'rotate') physics.applyImpulse('y', -IMPULSE_PER_TAP);
-      else resetZoom();
+      else if (mode === 'zoom') resetZoom();
+      else if (mode === 'anchor' && imu.isEnabled()) imu.recalibrate();
     },
     onUp: () => {
       if (mode === 'rotate') physics.applyImpulse('x', +IMPULSE_PER_TAP);
-      else applyZoomImpulse(+SCALE_IMPULSE);
+      else if (mode === 'zoom') applyZoomImpulse(+SCALE_IMPULSE);
+      // anchor mode: swipes are no-ops; head movement does the work
     },
     onDown: () => {
       if (mode === 'rotate') physics.applyImpulse('x', -IMPULSE_PER_TAP);
-      else applyZoomImpulse(-SCALE_IMPULSE);
+      else if (mode === 'zoom') applyZoomImpulse(-SCALE_IMPULSE);
     },
     onSelect,
     onBack,
@@ -187,9 +208,26 @@ async function boot() {
     const m = viewer.getModel();
     if (m) {
       physics.step(dt, m);
-      // IMU only contributes in rotate mode; in zoom mode the cube freezes
-      // visually so the user can focus on the scale gesture without drift.
-      if (mode === 'rotate') imu.step(dt, m);
+      // IMU contribution depends on mode:
+      //   rotate → applies to model rotation (head/wrist tilts the cube)
+      //   zoom   → ignored (cube stays still while user scales)
+      //   anchor → applies INVERSELY to camera (cube stays in world, view turns)
+      if (mode === 'rotate') {
+        imu.step(dt, m);
+      } else if (mode === 'anchor') {
+        const delta = imu.getDelta();
+        if (delta) {
+          // Camera yaws / pitches / rolls WITH the head so the model at the
+          // origin appears to stay "out there" in world space. Signs picked
+          // to feel natural: turn head left → cube slides right in view.
+          viewer.camera.rotation.set(
+            delta.beta * DEG,
+            delta.alpha * DEG,
+            delta.gamma * DEG,
+            'YXZ',
+          );
+        }
+      }
 
       // Zoom: log-space velocity so equal +/- taps cancel and the rate feels
       // exponential like the system volume knob. Damping matches rotation.

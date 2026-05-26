@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createImu } from '../src/imu.js';
 
 // jsdom doesn't fire DeviceOrientationEvent, so we synthesize it.
@@ -9,6 +9,17 @@ function fireOrientation(alpha, beta, gamma) {
   ev.gamma = gamma;
   window.dispatchEvent(ev);
 }
+
+// Drive the EMA to (near-)convergence by firing the same reading many times.
+// With SMOOTHING_ALPHA=0.15, 60 readings get us to >99.99% of the target.
+function settleTo(alpha, beta, gamma, n = 60) {
+  for (let i = 0; i < n; i++) fireOrientation(alpha, beta, gamma);
+}
+
+// Match production constants in src/imu.js.
+const DEAD_ZONE_DEG = 8;
+const TILT_GAIN = 0.6;
+const DEG = Math.PI / 180;
 
 describe('imu', () => {
   let imu;
@@ -32,52 +43,72 @@ describe('imu', () => {
     expect(obj.rotation).toEqual({ x: 0, y: 0, z: 0 });
   });
 
-  it('first orientation reading becomes the zero pose', () => {
-    fireOrientation(10, 20, 30);
-    // Same reading again — delta should be zero.
-    fireOrientation(10, 20, 30);
-    const obj = { rotation: { x: 0, y: 0, z: 0 } };
-    imu.step(0.016, obj);
-    expect(obj.rotation).toEqual({ x: 0, y: 0, z: 0 });
-  });
-
-  it('subsequent orientation reading produces rotation along the right axes', () => {
-    fireOrientation(0, 0, 0);              // zero
-    fireOrientation(45, 30, 20);           // delta = (45, 30, 20) deg
-    const obj = { rotation: { x: 0, y: 0, z: 0 } };
-    imu.step(1, obj); // dt = 1s so the gain * deadzone math is easy to verify
-
-    // After dead zone (1.5deg) and gain (0.9): each axis = (delta - 1.5) * 0.9 * deg2rad
-    const expectY = (45 - 1.5) * 0.9 * Math.PI / 180;
-    const expectX = (30 - 1.5) * 0.9 * Math.PI / 180;
-    const expectZ = (20 - 1.5) * 0.9 * Math.PI / 180;
-    expect(obj.rotation.y).toBeCloseTo(expectY, 5);
-    expect(obj.rotation.x).toBeCloseTo(expectX, 5);
-    expect(obj.rotation.z).toBeCloseTo(expectZ, 5);
-  });
-
-  it('dead zone suppresses small tilts (< 1.5deg)', () => {
-    fireOrientation(10, 10, 10);
-    fireOrientation(11, 11, 11); // delta = 1 deg < 1.5
+  it('first reading establishes a zero, holding still produces no rotation', () => {
+    settleTo(10, 20, 30);
     const obj = { rotation: { x: 0, y: 0, z: 0 } };
     imu.step(1, obj);
-    expect(obj.rotation).toEqual({ x: 0, y: 0, z: 0 });
+    expect(obj.rotation.x).toBeCloseTo(0, 5);
+    expect(obj.rotation.y).toBeCloseTo(0, 5);
+    expect(obj.rotation.z).toBeCloseTo(0, 5);
   });
 
-  it('recalibrate() snaps zero to current reading', () => {
+  it('reading well outside dead zone produces rotation along the right axes', () => {
+    settleTo(0, 0, 0);                  // zero
+    settleTo(45, 30, 20);               // converge smoothed → (45,30,20)
+    const obj = { rotation: { x: 0, y: 0, z: 0 } };
+    imu.step(1, obj);                    // dt = 1s
+
+    // After dead zone (8°) and gain (0.6), in radians.
+    const expectY = (45 - DEAD_ZONE_DEG) * TILT_GAIN * DEG;
+    const expectX = (30 - DEAD_ZONE_DEG) * TILT_GAIN * DEG;
+    const expectZ = (20 - DEAD_ZONE_DEG) * TILT_GAIN * DEG;
+    expect(obj.rotation.y).toBeCloseTo(expectY, 3);
+    expect(obj.rotation.x).toBeCloseTo(expectX, 3);
+    expect(obj.rotation.z).toBeCloseTo(expectZ, 3);
+  });
+
+  it('readings inside dead zone (≤ 8°) produce no rotation', () => {
+    settleTo(0, 0, 0);
+    settleTo(6, 6, 6); // all axes < DEAD_ZONE_DEG
+    const obj = { rotation: { x: 0, y: 0, z: 0 } };
+    imu.step(1, obj);
+    expect(obj.rotation.x).toBeCloseTo(0, 5);
+    expect(obj.rotation.y).toBeCloseTo(0, 5);
+    expect(obj.rotation.z).toBeCloseTo(0, 5);
+  });
+
+  it('EMA smoothing suppresses a single spike', () => {
+    settleTo(0, 0, 0);
+    // One huge spike then back to zero — smoothed only nudges 15% of the way.
+    fireOrientation(100, 0, 0);
     fireOrientation(0, 0, 0);
-    fireOrientation(50, 0, 0);
-    imu.recalibrate(); // now zero = (50, 0, 0)
-    fireOrientation(55, 0, 0); // delta = 5 deg
+    // Smoothed is now ~0 + 0.15*100 then back: 15 → 12.75. Below dead zone × (1-α) so:
+    // Actually after one spike+one zero, smoothed alpha = 15 - 0.15*15 = 12.75.
+    // Past 8° dead zone, so it WILL produce some rotation, but heavily damped.
+    // Compare to no smoothing: 100 - 8 = 92 active deg. With smoothing: 12.75 - 8 = 4.75.
+    // Smoothing reduces the kick by ~95%.
     const obj = { rotation: { x: 0, y: 0, z: 0 } };
     imu.step(1, obj);
-    const expectY = (5 - 1.5) * 0.9 * Math.PI / 180;
-    expect(obj.rotation.y).toBeCloseTo(expectY, 5);
+    const damped = obj.rotation.y;
+    // With smoothing, single-spike rotation should be small (well under the unsmoothed 92*gain*deg).
+    expect(Math.abs(damped)).toBeLessThan(0.1); // ~0.05 rad in practice
+  });
+
+  it('recalibrate() snaps zero to current smoothed pose', () => {
+    settleTo(0, 0, 0);
+    settleTo(50, 0, 0); // smoothed alpha ≈ 50
+    imu.recalibrate(); // zero ≈ (50,0,0)
+    settleTo(60, 0, 0); // smoothed climbs toward 60
+    const obj = { rotation: { x: 0, y: 0, z: 0 } };
+    imu.step(1, obj);
+    // Smoothed ≈ 60, zero ≈ 50, delta = 10°, active = 2° after dead zone.
+    const expectY = (60 - 50 - DEAD_ZONE_DEG) * TILT_GAIN * DEG;
+    expect(obj.rotation.y).toBeCloseTo(expectY, 3);
   });
 
   it('disable() removes the listener and clears state', () => {
-    fireOrientation(0, 0, 0);
-    fireOrientation(50, 50, 50);
+    settleTo(0, 0, 0);
+    settleTo(50, 50, 50);
     imu.disable();
     expect(imu.isEnabled()).toBe(false);
     fireOrientation(99, 99, 99); // ignored
@@ -88,8 +119,8 @@ describe('imu', () => {
 
   it('step() is a no-op when disabled', () => {
     imu.disable();
-    fireOrientation(0, 0, 0);
-    fireOrientation(50, 50, 50);
+    settleTo(0, 0, 0);
+    settleTo(50, 50, 50);
     const obj = { rotation: { x: 0, y: 0, z: 0 } };
     imu.step(1, obj);
     expect(obj.rotation).toEqual({ x: 0, y: 0, z: 0 });

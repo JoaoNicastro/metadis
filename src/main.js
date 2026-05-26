@@ -4,18 +4,16 @@ import { createInput } from './input.js';
 import { createImu } from './imu.js';
 
 const IMPULSE_PER_TAP = 2.5;
+const SCALE_IMPULSE = 2.5;       // exponent units per tap; 1 tap ≈ 15-20% size change before damping
+const SCALE_DAMPING = 0.985;     // matches rotation damping for consistent feel
+const SCALE_EPSILON = 0.001;
+const MIN_ZOOM = 0.1;            // 10% of fitted size
+const MAX_ZOOM = 5;              // 5x fitted size
 const DOUBLE_TAP_MS = 400;
-
-function getQueryFlag(name) {
-  const v = new URLSearchParams(window.location.search).get(name);
-  return v != null && v !== 'false' && v !== '0';
-}
 
 function getModelUrl() {
   const params = new URLSearchParams(window.location.search);
   const url = params.get('model');
-  // Use Vite's BASE_URL so the fallback path resolves correctly on a
-  // subpath deploy (e.g. https://user.github.io/metadis/fallback.glb).
   return url || `${import.meta.env.BASE_URL}fallback.glb`;
 }
 
@@ -47,12 +45,12 @@ async function boot() {
   const url = getModelUrl();
   try {
     await viewer.loadModel(url);
-    setStatus(`model: ${getFilename(url)}`);
+    setStatus(`mode: rotate · ${getFilename(url)}`);
   } catch (err) {
     console.warn('failed to load model, showing fallback cube', err);
     try {
       viewer.loadFallbackCube();
-      setStatus(`fallback (failed: ${getFilename(url)})`);
+      setStatus(`mode: rotate · fallback (load failed)`);
     } catch (fbErr) {
       console.error('WebGL context unavailable', fbErr);
       setStatus('error: WebGL unavailable');
@@ -60,67 +58,121 @@ async function boot() {
     }
   }
 
-  // Enable head IMU by default unless ?imu=off. The Meta Display Web App
-  // runtime doesn't expose Neural Band's twist gesture (system-reserved for
-  // volume), so head tilt is the closest continuous-control equivalent.
-  const imuEnabledByQuery = !getQueryFlag('imu') || (new URLSearchParams(window.location.search).get('imu') !== 'off');
-  let imuOn = false;
-  if (imuEnabledByQuery) {
-    imuOn = await imu.enable();
-    if (imuOn) console.info('IMU enabled — head tilt → model rotation');
+  // Capture the auto-fit base scale so zoomFactor=1 means "fitted to view".
+  const model = viewer.getModel();
+  const baseScale = model ? model.scale.x : 1;
+
+  // Two interaction modes:
+  //   rotate — arrows = angular impulse; IMU bias also applies; default.
+  //   zoom   — Up/Down = scale impulse; Left/Right = reset zoom; IMU paused.
+  let mode = 'rotate';
+  let zoomFactor = 1;
+  let zoomVel = 0;
+
+  // IMU: opt-out via ?imu=off. Smoothed + dead-zoned in src/imu.js so it no
+  // longer drives the cube around when you're holding still.
+  const params = new URLSearchParams(window.location.search);
+  const imuParam = params.get('imu');
+  if (imuParam !== 'off') {
+    const ok = await imu.enable();
+    if (ok) console.info('IMU enabled — wrist/head tilt → rotation bias (mode=rotate only)');
     else console.warn('IMU unavailable on this platform');
   }
 
-  // Detect double-pinch on Enter for IMU recalibrate (snap head-zero to
-  // current pose). Single Enter still resets physics rotation+velocity.
+  function statusForMode() {
+    const m = `mode: ${mode}`;
+    const imuTag = imu.isEnabled() ? '' : ' · imu:off';
+    return mode === 'zoom'
+      ? `${m}${imuTag} · ${zoomFactor.toFixed(2)}x`
+      : `${m}${imuTag}`;
+  }
+
+  function refreshStatus() {
+    setStatus(statusForMode());
+  }
+
+  function setMode(next) {
+    mode = next;
+    if (mode === 'zoom') {
+      // Stop any rotational momentum so zoom feels clean (visual stillness).
+      physics.reset(null); // zero velocity but keep current rotation
+    } else {
+      // Returning to rotate: keep current zoom in place; user can reset later.
+      zoomVel = 0;
+    }
+    refreshStatus();
+  }
+
+  function applyZoomImpulse(delta) {
+    zoomVel += delta;
+  }
+
+  function resetZoom() {
+    zoomFactor = 1;
+    zoomVel = 0;
+    if (model) model.scale.setScalar(baseScale);
+    refreshStatus();
+  }
+
+  // Input handling — mode-aware. Each Neural Band gesture / equivalent key:
+  //   left/right   rotate mode: yaw impulse           zoom mode: reset zoom
+  //   up/down      rotate mode: pitch impulse         zoom mode: zoom in/out
+  //   select       single: reset rotation+zoom        double: recalibrate IMU
+  //   back         single: toggle rotate ↔ zoom       double: toggle IMU on/off
   let lastEnter = 0;
   function onSelect() {
     const now = performance.now();
     if (now - lastEnter < DOUBLE_TAP_MS) {
-      // Double-pinch: recalibrate IMU zero or toggle IMU if not enabled.
       if (imu.isEnabled()) {
         imu.recalibrate();
-        setStatus('imu: recalibrated');
+        setStatus(`${statusForMode()} · imu recalibrated`);
       } else {
         imu.enable().then(ok => {
-          imuOn = ok;
-          setStatus(`imu: ${ok ? 'on' : 'unavailable'}`);
+          setStatus(`${statusForMode()} · imu ${ok ? 'on' : 'unavailable'}`);
         });
       }
-      lastEnter = 0; // consume — don't also trigger reset
+      lastEnter = 0;
       return;
     }
     lastEnter = now;
     physics.reset(viewer.getModel());
+    resetZoom();
   }
 
-  // Detect double-back to toggle IMU off (in case user is getting dizzy).
   let lastBack = 0;
   function onBack() {
     const now = performance.now();
     if (now - lastBack < DOUBLE_TAP_MS) {
-      // Double-back: toggle IMU.
       if (imu.isEnabled()) {
         imu.disable();
-        setStatus('imu: off');
       } else {
-        imu.enable().then(ok => {
-          setStatus(`imu: ${ok ? 'on' : 'unavailable'}`);
-        });
+        imu.enable();
       }
+      refreshStatus();
       lastBack = 0;
       return;
     }
     lastBack = now;
-    const continuous = physics.toggleContinuous();
-    setStatus(`spin: ${continuous ? 'continuous' : 'damped'}`);
+    setMode(mode === 'rotate' ? 'zoom' : 'rotate');
   }
 
   const input = createInput({
-    onLeft: () => physics.applyImpulse('y', +IMPULSE_PER_TAP),
-    onRight: () => physics.applyImpulse('y', -IMPULSE_PER_TAP),
-    onUp: () => physics.applyImpulse('x', +IMPULSE_PER_TAP),
-    onDown: () => physics.applyImpulse('x', -IMPULSE_PER_TAP),
+    onLeft: () => {
+      if (mode === 'rotate') physics.applyImpulse('y', +IMPULSE_PER_TAP);
+      else resetZoom();
+    },
+    onRight: () => {
+      if (mode === 'rotate') physics.applyImpulse('y', -IMPULSE_PER_TAP);
+      else resetZoom();
+    },
+    onUp: () => {
+      if (mode === 'rotate') physics.applyImpulse('x', +IMPULSE_PER_TAP);
+      else applyZoomImpulse(+SCALE_IMPULSE);
+    },
+    onDown: () => {
+      if (mode === 'rotate') physics.applyImpulse('x', -IMPULSE_PER_TAP);
+      else applyZoomImpulse(-SCALE_IMPULSE);
+    },
     onSelect,
     onBack,
   });
@@ -132,10 +184,23 @@ async function boot() {
   function tick(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
-    const model = viewer.getModel();
-    if (model) {
-      physics.step(dt, model);
-      imu.step(dt, model);
+    const m = viewer.getModel();
+    if (m) {
+      physics.step(dt, m);
+      // IMU only contributes in rotate mode; in zoom mode the cube freezes
+      // visually so the user can focus on the scale gesture without drift.
+      if (mode === 'rotate') imu.step(dt, m);
+
+      // Zoom: log-space velocity so equal +/- taps cancel and the rate feels
+      // exponential like the system volume knob. Damping matches rotation.
+      if (zoomVel !== 0 || Math.abs(1 - zoomFactor / Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomFactor))) > 0) {
+        zoomFactor *= Math.exp(zoomVel * dt);
+        zoomFactor = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoomFactor));
+        zoomVel *= SCALE_DAMPING;
+        if (Math.abs(zoomVel) < SCALE_EPSILON) zoomVel = 0;
+        m.scale.setScalar(baseScale * zoomFactor);
+        if (mode === 'zoom') refreshStatus();
+      }
     }
     viewer.render();
     animId = requestAnimationFrame(tick);
@@ -156,18 +221,9 @@ async function boot() {
 
   startLoop();
 
-  window.addEventListener('pause', () => {
-    stopLoop();
-    setStatus('paused');
-  });
-  window.addEventListener('resume', () => {
-    startLoop();
-    setStatus('resumed');
-  });
-  window.addEventListener('stop', () => {
-    stopLoop();
-    setStatus('stopped');
-  });
+  window.addEventListener('pause', () => { stopLoop(); setStatus('paused'); });
+  window.addEventListener('resume', () => { startLoop(); refreshStatus(); });
+  window.addEventListener('stop', () => { stopLoop(); setStatus('stopped'); });
 }
 
 boot();

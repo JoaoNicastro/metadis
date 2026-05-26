@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=600, height=600, initial-scale=1" />
+    <title>Spike — WebGL + key logger</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #000; color: #fff; font-family: monospace; overflow: hidden; }
+      #app { width: 600px; height: 600px; position: relative; }
+      canvas { display: block; }
+      #log {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        font-size: 14px;
+        line-height: 1.3;
+        white-space: pre;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="log">spike: webgl + key logger</div>
+    </div>
+    <script type="module">
+      import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+
+      const app = document.getElementById('app');
+      const log = document.getElementById('log');
+
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+      camera.position.z = 3;
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+      renderer.setSize(600, 600);
+      renderer.setClearColor(0x000000);
+      app.appendChild(renderer.domElement);
+
+      const geom = new THREE.BoxGeometry(1, 1, 1);
+      const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, metalness: 0.1, roughness: 0.6 });
+      const cube = new THREE.Mesh(geom, mat);
+      scene.add(cube);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+      const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+      dir.position.set(2, 2, 3);
+      scene.add(dir);
+
+      const lines = ['spike: webgl + key logger', `webgl: ${!!renderer.getContext()}`];
+      const pushLine = (s) => {
+        lines.push(s);
+        while (lines.length > 12) lines.shift();
+        log.textContent = lines.join('\n');
+      };
+
+      window.addEventListener('keydown', (e) => {
+        pushLine(`key=${e.key} code=${e.code}`);
+      });
+
+      window.addEventListener('pause', () => pushLine('event:pause'));
+      window.addEventListener('resume', () => pushLine('event:resume'));
+      window.addEventListener('stop', () => pushLine('event:stop'));
+
+      // DeviceOrientation: confirm IMU fires on Meta Display. Throttle to once
+      // every 250ms so we don't blow up the log.
+      let lastImuLog = 0;
+      const ReqPerm = window.DeviceOrientationEvent && window.DeviceOrientationEvent.requestPermission;
+      if (typeof ReqPerm === 'function') {
+        ReqPerm().then(r => pushLine(`imu perm: ${r}`)).catch(e => pushLine(`imu perm err: ${e}`));
+      }
+      window.addEventListener('deviceorientation', (e) => {
+        const now = performance.now();
+        if (now - lastImuLog < 250) return;
+        lastImuLog = now;
+        const a = e.alpha == null ? 'null' : e.alpha.toFixed(1);
+        const b = e.beta == null ? 'null' : e.beta.toFixed(1);
+        const g = e.gamma == null ? 'null' : e.gamma.toFixed(1);
+        pushLine(`imu α=${a} β=${b} γ=${g}`);
+      });
+
+      let last = performance.now();
+      let frames = 0;
+      let fpsLastReport = last;
+
+      function tick(now) {
+        const dt = Math.min((now - last) / 1000, 0.05);
+        last = now;
+        cube.rotation.x += 0.6 * dt;
+        cube.rotation.y += 0.8 * dt;
+        renderer.render(scene, camera);
+        frames++;
+        if (now - fpsLastReport > 1000) {
+          pushLine(`fps≈${frames}`);
+          frames = 0;
+          fpsLastReport = now;
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    </script>
+  </body>
+</html>

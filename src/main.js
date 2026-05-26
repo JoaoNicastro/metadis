@@ -14,7 +14,9 @@ function getQueryFlag(name) {
 function getModelUrl() {
   const params = new URLSearchParams(window.location.search);
   const url = params.get('model');
-  return url || '/fallback.glb';
+  // Use Vite's BASE_URL so the fallback path resolves correctly on a
+  // subpath deploy (e.g. https://user.github.io/metadis/fallback.glb).
+  return url || `${import.meta.env.BASE_URL}fallback.glb`;
 }
 
 function setStatus(text) {

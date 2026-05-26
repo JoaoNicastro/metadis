@@ -1,10 +1,20 @@
-// Wrist / head IMU tilt → continuous model rotation bias.
+// Head IMU tilt → continuous bias rotation. Currently UNUSED in main.js
+// (v1.4 dropped IMU-driven model rotation — see PLATFORM-NOTES below).
 //
-// The Meta Display does NOT expose the Neural Band's twist gesture (pinça +
-// rotação do pulso) to web apps — it's reserved for system volume. The
-// closest continuous-control equivalent the platform exposes is the IMU
-// via DeviceOrientation. On Meta Display this empirically reflects the
-// wrist (Neural Band), not the head.
+// PLATFORM-NOTES (verified empirically 2026-05-26 on the device):
+// - On the Meta Ray-Ban Display Web App runtime, DeviceOrientation reflects
+//   the GLASSES (head IMU), not the wrist. A prior comment claimed wrist —
+//   that was wrong.
+// - The Neural Band's EMG + IMU stay on-device; only discrete gesture
+//   events (Enter / Escape / Arrow keys) leak to Web Apps. No continuous
+//   wrist tracking is possible via Web App APIs.
+// - True wrist orientation/position requires the native Wearables Device
+//   Access Toolkit (Swift / Kotlin), which is a separate build path.
+//
+// The module is kept around because:
+// - Head-IMU "look-to-aim" or world-locked anchor modes are plausible
+//   future features that would use it intentionally.
+// - The smoothing pipeline (EMA, dead zone, calibration) is reusable.
 //
 // Output:
 //   step(dt, object3D) — additively rotates the object based on current

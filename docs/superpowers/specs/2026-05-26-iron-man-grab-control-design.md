@@ -1,10 +1,19 @@
 # Iron Man Grab Control — Manipulação Contínua por Pulso
 
+> **⚠️ SUPERSEDED por v1.4 (2026-05-26)** — este design partiu de duas premissas que se mostraram **falsas em testes no device**:
+> 1. Que `DeviceOrientation` no Meta Ray-Ban Display reflete o pulso (Neural Band) — **na verdade reflete a cabeça** (IMU dos óculos).
+> 2. Que dava pra ler XYZ contínuo do pulso via Web App — **não dá**. O EMG/IMU da Neural Band fica on-device; só gestos discretos vazam.
+>
+> Resultado prático no device: o "grab que segue a mão" seguia a cabeça (péssimo), e o pinch+rotação do pulso esbarrava no gesto de volume do sistema. Veja [`2026-05-26-v1.4-platform-correction.md`](./2026-05-26-v1.4-platform-correction.md) pra o postmortem e o caminho do v1.4.
+>
+> Mantido como histórico — o desenho ainda seria correto se a Neural Band expusesse IMU contínuo (caminho atual pra isso é a Wearables Device Access Toolkit nativa, Swift/Kotlin — não Web App).
+
 **Data:** 2026-05-26
-**Status:** Design aprovado (Abordagem 2 — Grab com modos)
+**Status:** ❌ Superseded — implementado em v1.3 (PR #2), revertido em v1.4 (postmortem)
 **Autor:** João (com assistência do Claude Code)
 **Versão alvo:** v1.3
 **Predecessor:** [v1.2 — WebXR + 3 modos discretos](./2026-05-25-meta-display-3d-viewer-design.md)
+**Sucessor:** [v1.4 — platform correction](./2026-05-26-v1.4-platform-correction.md)
 
 ---
 

@@ -5,14 +5,18 @@ import { createPhysics } from './physics.js';
 import { createInput } from './input.js';
 import { createMultitap } from './multitap.js';
 
-const METADIS_VERSION = '1.4';
+const METADIS_VERSION = '1.5';
 const IMPULSE_PER_TAP = 2.5;
 const SCALE_IMPULSE = 2.5;       // exponent units per tap; 1 tap ≈ 15-20% size change before damping
 const SCALE_DAMPING = 0.985;     // matches rotation damping for consistent feel
 const SCALE_EPSILON = 0.001;
 const MIN_ZOOM = 0.1;            // 10% of fitted size
 const MAX_ZOOM = 5;              // 5x fitted size
-const MULTITAP_WINDOW_MS = 400;
+
+// Multitap window — shorter than v1.4's 400ms because all single-tap actions
+// now go through the multitap path (reset is the single, cycle is the double),
+// and 280ms feels snappier without sacrificing reliable double-tap detection.
+const MULTITAP_WINDOW_MS = 280;
 
 function getModelUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -151,19 +155,24 @@ async function boot() {
   const model = viewer.getModel();
   const baseScale = model ? model.scale.x : 1;
 
-  // Two active modes (cycle with single Back / Escape):
+  // Two active modes (cycle with double pinch index):
   //   rotate — ←→ apply yaw impulse, ↑↓ apply pitch impulse. Damping decelerates.
   //   scale  — ↑↓ apply scale impulse, ←→ reset zoom.
   // 'explode' slot reserved for a future model-aware partition mode (v2+).
   //
-  // IMU/DeviceOrientation is intentionally NOT wired into the model in v1.4.
+  // GESTURE NOTES (verified empirically on Meta Ray-Ban Display 2026-05-26):
+  // - Pinch polegar+médio is intercepted by the system as 'back' navigation
+  //   and DOES NOT deliver a KeyboardEvent (Escape) to the Web App.
+  // - The 'onBack' handler is still wired in case a future firmware fixes
+  //   this, but no controls depend on it in v1.5.
+  // - Pinch polegar+indicador (single + long press emit the same Enter; long
+  //   press is cosmetic) is the only reliable discrete gesture for click.
+  // - Swipes 4-direction deliver Arrow keys cleanly.
+  //
+  // IMU/DeviceOrientation is intentionally NOT wired into the model.
   // On the Meta Ray-Ban Display, DeviceOrientation reflects the HEAD (glasses
-  // IMU), not the wrist (Neural Band's IMU + EMG stay on-device and only
-  // emit discrete gesture events). A prior version routed head tilt into
-  // model rotation as a "bias" — the result felt like the cube was tied to
-  // the user's gaze and made the experience worse, not better.
-  // Native wrist tracking would require the Wearables Device Access Toolkit
-  // (Swift/Kotlin), not Web Apps.
+  // IMU), not the wrist. Native wrist tracking would require the Wearables
+  // Device Access Toolkit (Swift/Kotlin), not Web Apps.
   const MODE_CYCLE = ['rotate', 'scale'];
   let mode = 'rotate';
   let zoomFactor = 1;
@@ -171,8 +180,9 @@ async function boot() {
 
   // Damped: applyImpulse + physics.step damp → cube decelerates to rest.
   // Frozen: every step zeroes velocity → cube stops on each impulse end.
-  // Toggled by double-Escape.
-  let physicsMode = 'damped';
+  // Default damped. Override via URL param `?physics=frozen`.
+  const physicsParam = new URLSearchParams(window.location.search).get('physics');
+  let physicsMode = physicsParam === 'frozen' ? 'frozen' : 'damped';
 
   let inXR = false;
   const xr = await setupWebXR(viewer, {
@@ -220,11 +230,6 @@ async function boot() {
     refreshStatus();
   }
 
-  function togglePhysicsMode() {
-    physicsMode = physicsMode === 'damped' ? 'frozen' : 'damped';
-    refreshStatus();
-  }
-
   function applyZoomImpulse(delta) {
     zoomVel += delta;
   }
@@ -243,13 +248,15 @@ async function boot() {
     refreshStatus();
   }
 
-  // Single Escape cycles mode; double-Escape toggles physics mode.
-  // Enter resets immediately — no multitap (avoids the 400ms latency on the
-  // most common gesture).
-  const escapeTap = createMultitap({
+  // v1.5: only the pinch index gesture (Enter) reaches the Web App reliably.
+  // Pinch médio (would-be Escape) is intercepted by the system as 'back'
+  // and never lands here. So both reset and mode-cycle live on Enter:
+  //   single Enter → reset all (after MULTITAP_WINDOW_MS to disambiguate)
+  //   double Enter → cycle mode (instant, fires on 2nd tap)
+  const enterTap = createMultitap({
     windowMs: MULTITAP_WINDOW_MS,
-    onSingle: cycleMode,
-    onDouble: togglePhysicsMode,
+    onSingle: resetAll,
+    onDouble: cycleMode,
   });
 
   const input = createInput({
@@ -269,8 +276,10 @@ async function boot() {
       if (mode === 'rotate') physics.applyImpulse('x', -IMPULSE_PER_TAP);
       else if (mode === 'scale') applyZoomImpulse(-SCALE_IMPULSE);
     },
-    onSelect: resetAll,
-    onBack: () => escapeTap.tap(),
+    onSelect: () => enterTap.tap(),
+    // onBack is wired but does nothing in v1.5 — the system intercepts the
+    // pinch médio (Escape) gesture before it can reach the Web App.
+    onBack: () => {},
   });
   input.attach();
 

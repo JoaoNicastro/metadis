@@ -1,6 +1,6 @@
 # Metadis — Memory Handoff
 
-> Cola isso num chat novo (sem contexto prévio) pra trazer o próximo assistente up to speed em 2 minutos. Atualizado em **2026-05-26 · v1.5**.
+> Cola isso num chat novo (sem contexto prévio) pra trazer o próximo assistente up to speed em 2 minutos. Atualizado em **2026-05-26 · v1.6**.
 
 ---
 
@@ -10,7 +10,7 @@
 
 - **Live:** https://metadis.surge.sh
 - **Repo:** https://github.com/JoaoNicastro/metadis
-- **Versão atual:** 1.5
+- **Versão atual:** 1.6
 - **Owner:** João (jnjojonic@gmail.com)
 
 ---
@@ -29,28 +29,45 @@ Estas verdades são **caras** — cada uma custou um round-trip de design+deploy
 | `navigator.xr` **não está disponível** no Display | Código WebXR (ARButton, hit-test) existe pra Quest browser/Vision Pro mas é no-op aqui. |
 | Viewport: 600×600 monocular **aditivo** | Preto = transparente nos óculos. Use materiais claros + fundo `#000`. |
 
-**Caminho pra escapar dessas limitações:** [Wearables Device Access Toolkit](https://developers.meta.com/blog/build-for-display-glasses/) (Swift iOS / Kotlin Android). Não é Web App, é rewrite.
+**Caminho pra escapar dessas limitações:** [Wearables Device Access Toolkit (DAT)](https://developers.meta.com/blog/build-for-display-glasses/) — duas opções:
+- **Native SDK** (Swift iOS / Kotlin Android): único caminho pra wrist tracking contínuo, raw EMG, etc. Rewrite total.
+- **Web Apps oficial** ([docs](https://wearables.developer.meta.com/docs/develop/webapps), [starter kit](https://github.com/facebookincubator/meta-wearables-webapp)): mesma stack HTML/CSS/JS que já usamos. Não desbloqueia gestos novos — mesmas 4 setas + Enter + Escape — mas dá tooling oficial (plugin Claude Code com skills `create-webapp`/`add-screen`/`add-sensors`/etc) e canal de publicação previsto pra "ainda em 2026". Metadis hoje já é compatível com esse caminho de fato (HTML/CSS/JS hospedado em HTTPS). Migrar = adotar `.focusable` class e cabe nos performance budgets (load <3s, JS gzip <500KB, 60fps, <128MB RAM, <10 net req — já atendemos 153KB gzip, fits).
 
 ---
 
-## Vocabulário de controles (v1.5)
+## Vocabulário de controles (v1.6)
 
-| Gesto Neural Band | Tecla emitida | Ação |
+**5 modos no cycle** (cada modo reinterpreta as 4 setas): `rotate` → `scale` → `translate` → `roll` → `snap` → volta. Avança com double pinch indicador.
+
+| Gesto Neural Band | Tecla | Ação em `rotate` | Ação em `scale` | Ação em `translate` | Ação em `roll` | Ação em `snap` |
+| --- | --- | --- | --- | --- | --- | --- |
+| Swipe ← | `ArrowLeft` | yaw + impulse | reset zoom | mover −X | roll horário | snap −45° Y |
+| Swipe → | `ArrowRight` | yaw − impulse | reset zoom | mover +X | roll anti-horário | snap +45° Y |
+| Swipe ↑ | `ArrowUp` | pitch + impulse | zoom + | mover +Y | boost spin Z atual (×1.6) | snap +45° X |
+| Swipe ↓ | `ArrowDown` | pitch − impulse | zoom − | mover −Y | brake spin Z (zera) | snap −45° X |
+
+**Pinch indicador** (único gesto pinch confiável — gera `Enter` keydown):
+
+| Quantidade rápida | Latência | Ação |
 | --- | --- | --- |
-| Swipe ← | `ArrowLeft` | rotate: yaw + impulse · scale: reset zoom |
-| Swipe → | `ArrowRight` | rotate: yaw − impulse · scale: reset zoom |
-| Swipe ↑ | `ArrowUp` | rotate: pitch + impulse · scale: zoom + |
-| Swipe ↓ | `ArrowDown` | rotate: pitch − impulse · scale: zoom − |
-| Pinch polegar+indicador (1 toca-solta rápido) | `Enter` | Reset total (rotação + zoom + spin) — após 280ms |
-| Pinch polegar+indicador (2 dentro de 280ms) | `Enter` × 2 | Cicla modo `rotate` ⇄ `scale` — instantâneo |
-| URL param `?physics=frozen` | — | Override: release não carrega momentum |
-| URL param `?model=<url>` | — | Carrega `.glb` arbitrário de URL HTTPS |
-| URL param `?imu=off` | — | (legado, IMU já não é usado em v1.5) |
+| 1 tap | 280ms | Reset total: rotação + zoom + translate + spin |
+| 2 taps em até 280ms | +180ms | Cicla modo (ordem acima) |
+| 3 taps em até 280+180ms | 0 (instantâneo) | **Toggle spin contínuo** (rotação sem damping) |
+
+**URL params:**
+
+| Param | Efeito |
+| --- | --- |
+| `?physics=frozen` | Override: nenhum impulso carrega momentum (zerado por frame) |
+| `?model=<url>` | Carrega `.glb` arbitrário de URL HTTPS |
+| `?imu=off` | (legado, IMU já não é usado desde v1.5) |
 
 **Gestos que NÃO funcionam (não tente):**
-- Pinch polegar+médio (qualquer variação)
-- Pinch + girar pulso
+- Pinch polegar+médio (qualquer variação — sistema captura como 'back')
+- Pinch + girar pulso (vira controle de volume do sistema)
 - Cabeça → cubo (não é controle, é só observação de mundo se você adicionar modo intencional)
+- Custom gestures arbitrários — Web App SDK oficial confirma: só estes 6 keydowns (4 setas + Enter + Escape, e Escape é absorvido)
+- Combos de setas opostas (←→ rápido) — descartado em v1.6 design: adicionar 200ms+ de latência em cada swipe pra detectar pair quebra a responsividade do `rotate`/`scale`. Modos extras cobrem a necessidade de vocabulário.
 
 ---
 
@@ -60,13 +77,14 @@ Estas verdades são **caras** — cada uma custou um round-trip de design+deploy
 metadis/
 ├── src/
 │   ├── viewer.js    — Three.js scene, camera, lights, GLTFLoader. SEM mudança desde v1.0.
-│   ├── physics.js   — angular velocity + damping + reset + toggleContinuous. PURO, testado.
+│   ├── physics.js   — angular velocity + damping + reset + toggleContinuous (usado em v1.6 pelo triple-pinch). PURO, testado.
 │   ├── input.js     — keydown → callback dispatch. Mapeia 4 setas + Enter + Escape.
 │   ├── imu.js       — DeviceOrientation com EMA smoothing + dead zone. PRESENTE mas
-│   │                  NÃO USADO em v1.5 (head, não pulso). Comentário explica por quê.
-│   ├── multitap.js  — detector genérico de single/double tap. Pure JS, timer-based.
-│   └── main.js      — bootstrap, mode state, HUD, render loop, glue de tudo.
-├── tests/           — vitest + jsdom. 39 testes.
+│   │                  NÃO USADO em v1.5+ (head, não pulso). Comentário explica por quê.
+│   ├── multitap.js  — detector genérico single/double/triple. Pure JS, timer-based.
+│   │                  v1.6 estendeu pra 3-tier opcional (passa onTriple).
+│   └── main.js      — bootstrap, mode state (5 modos), HUD, render loop, glue de tudo.
+├── tests/           — vitest + jsdom. 45 testes.
 ├── public/
 │   ├── fallback.glb — Khronos Box (~1.6KB), usado se nenhum ?model= passado
 │   ├── CNAME        — domínio do Surge.sh (preserva em re-deploys)
@@ -152,7 +170,8 @@ O device do Meta Display **segura HTML cacheado de forma agressiva**, mesmo com 
 - **v1.0–1.2:** swipes discretos + IMU bias da cabeça misturado como "drift" rotacional (na época achava que era pulso — não era). Anchor mode tinha 3DoF fake via rotação de câmera.
 - **v1.3 (revertido):** tentou grab contínuo (single pinch = agarra, pulso vira input 1:1). Falhou no device porque (a) IMU é cabeça, (b) pinch+rotação = volume. PR #2.
 - **v1.4:** revert do grab. Modos `rotate` e `scale` discretos. Pinch médio (Escape) ainda era usado pra cycle/toggle. PR #5.
-- **v1.5 (atual):** descobriu que pinch médio não chega como `Escape` no Web App (sistema absorve). Tudo migrou pra pinch indicador (single = reset, double = cycle). Toggle de física virou URL param. PR #6.
+- **v1.5:** descobriu que pinch médio não chega como `Escape` no Web App (sistema absorve). Tudo migrou pra pinch indicador (single = reset, double = cycle). Toggle de física virou URL param. PR #6.
+- **v1.6 (atual):** vocabulário expandido sem violar restrições da plataforma. Multitap estendido pra 3-tier (triple-pinch = toggle spin contínuo). 3 novos modos no cycle: `translate` (move XY), `roll` (spin Z + boost/brake), `snap` (45° steps sem física). Total 5 modos. Sem combos (trade-off de latência ruim). PR pendente.
 
 ---
 
@@ -192,10 +211,11 @@ Quando trabalhar nesse repo, as skills relevantes são:
 
 ## Próximos passos plausíveis (não comprometido)
 
-- **Modo `explode`:** separar partes do `.glb` em camadas (slot já reservado em `MODE_CYCLE`). Requer modelos com hierarquia significativa.
+- **Modo `explode`:** separar partes do `.glb` em camadas (slot já existia em `MODE_CYCLE`; v1.6 não preencheu). Requer modelos com hierarquia significativa.
 - **Wrist Writing** (Meta announced 2026): se Meta expor letras traçadas como `KeyboardEvent`, dá pra mapear comandos (ex: traçar "i" → invert). API status incerto.
 - **Modo "look-to-aim" intencional:** usar head IMU como controle deliberado em um modo isolado (não bias). Cubo "world-locked" enquanto você anda em volta dele.
-- **Native build via Wearables Device Access Toolkit (Swift/Kotlin):** única forma de ter wrist contínuo. Rewrite grande — decisão estratégica do João.
+- **Migrar pro Web Apps SDK oficial (Mai/2026):** instalar [meta-wearables-webapp](https://github.com/facebookincubator/meta-wearables-webapp) skill no Claude Code, adotar classe `.focusable` se houver UI navegável (atualmente só 1 canvas + HUD), e usar `/test-on-device` + `/publish-to-vercel` do plugin. Não muda gestos (mesmas 6 teclas), mas alinha com canal de distribuição oficial e tooling. Build atual (153KB gzip) já atende performance budgets.
+- **Native build via Wearables Device Access Toolkit (Swift/Kotlin):** única forma de ter wrist contínuo, raw EMG, câmera, ou Meta AI. Rewrite grande — decisão estratégica do João.
 
 ---
 

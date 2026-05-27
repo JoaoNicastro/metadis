@@ -5,7 +5,7 @@ import { createPhysics } from './physics.js';
 import { createInput } from './input.js';
 import { createMultitap } from './multitap.js';
 
-const METADIS_VERSION = '1.5';
+const METADIS_VERSION = '1.6';
 const IMPULSE_PER_TAP = 2.5;
 const SCALE_IMPULSE = 2.5;       // exponent units per tap; 1 tap ≈ 15-20% size change before damping
 const SCALE_DAMPING = 0.985;     // matches rotation damping for consistent feel
@@ -13,10 +13,34 @@ const SCALE_EPSILON = 0.001;
 const MIN_ZOOM = 0.1;            // 10% of fitted size
 const MAX_ZOOM = 5;              // 5x fitted size
 
+// Translate mode (v1.6): swipes move the model on the X/Y plane (camera-relative).
+// Clamp keeps it inside the 600x600 viewport. Unit = world space.
+const TRANSLATE_PER_TAP = 0.15;
+const MIN_TRANSLATE = -1.2;
+const MAX_TRANSLATE = 1.2;
+
+// Roll mode (v1.6): swipes rotate around the Z axis (the line of sight).
+// ←/→ apply impulse, ↑ boosts in the current direction, ↓ brakes (zeroes z velocity).
+const ROLL_IMPULSE = 2.5;
+const ROLL_BOOST = 1.6;          // multiplier when ↑ taps mid-spin
+
+// Snap mode (v1.6): each swipe instantly rotates by SNAP_STEP. No physics, no
+// damping — for users who want predictable, repeatable orientation.
+const SNAP_STEP = Math.PI / 4;   // 45° per swipe; 8 swipes complete a full turn
+
 // Multitap window — shorter than v1.4's 400ms because all single-tap actions
 // now go through the multitap path (reset is the single, cycle is the double),
 // and 280ms feels snappier without sacrificing reliable double-tap detection.
+// Triple-tap window is shorter (180ms) — it only matters after a 2nd tap has
+// already landed, so the user is already mid-burst.
 const MULTITAP_WINDOW_MS = 280;
+const TRIPLE_WINDOW_MS = 180;
+
+function clamp(v, min, max) {
+  if (v > max) return max;
+  if (v < min) return min;
+  return v;
+}
 
 function getModelUrl() {
   const params = new URLSearchParams(window.location.search);
@@ -154,29 +178,35 @@ async function boot() {
 
   const model = viewer.getModel();
   const baseScale = model ? model.scale.x : 1;
+  const baseFitPosition = model ? model.position.clone() : new THREE.Vector3();
 
-  // Two active modes (cycle with double pinch index):
-  //   rotate — ←→ apply yaw impulse, ↑↓ apply pitch impulse. Damping decelerates.
-  //   scale  — ↑↓ apply scale impulse, ←→ reset zoom.
-  // 'explode' slot reserved for a future model-aware partition mode (v2+).
+  // Five active modes (cycle with double pinch index):
+  //   rotate    — ←→ apply yaw impulse, ↑↓ apply pitch impulse. Damping.
+  //   scale     — ↑↓ apply scale impulse, ←→ reset zoom.
+  //   translate — swipes shift model on X/Y; ←/→ = ∓X, ↑/↓ = ±Y. Clamped to viewport.
+  //   roll      — ←/→ roll around Z, ↑ boost current spin, ↓ brake to stop.
+  //   snap      — each swipe rotates instantly by 45° (no physics).
+  // 'explode' slot reserved for a future model-aware partition mode.
   //
   // GESTURE NOTES (verified empirically on Meta Ray-Ban Display 2026-05-26):
   // - Pinch polegar+médio is intercepted by the system as 'back' navigation
   //   and DOES NOT deliver a KeyboardEvent (Escape) to the Web App.
   // - The 'onBack' handler is still wired in case a future firmware fixes
-  //   this, but no controls depend on it in v1.5.
+  //   this, but no controls depend on it in v1.6.
   // - Pinch polegar+indicador (single + long press emit the same Enter; long
   //   press is cosmetic) is the only reliable discrete gesture for click.
+  //   v1.6 uses single/double/triple counts of this gesture (see enterTap).
   // - Swipes 4-direction deliver Arrow keys cleanly.
   //
   // IMU/DeviceOrientation is intentionally NOT wired into the model.
   // On the Meta Ray-Ban Display, DeviceOrientation reflects the HEAD (glasses
   // IMU), not the wrist. Native wrist tracking would require the Wearables
   // Device Access Toolkit (Swift/Kotlin), not Web Apps.
-  const MODE_CYCLE = ['rotate', 'scale'];
+  const MODE_CYCLE = ['rotate', 'scale', 'translate', 'roll', 'snap'];
   let mode = 'rotate';
   let zoomFactor = 1;
   let zoomVel = 0;
+  let translateOffset = { x: 0, y: 0 };
 
   // Damped: applyImpulse + physics.step damp → cube decelerates to rest.
   // Frozen: every step zeroes velocity → cube stops on each impulse end.
@@ -205,7 +235,9 @@ async function boot() {
       inXR = false;
       const m = viewer.getModel();
       if (m) {
-        m.position.set(0, 0, 0);
+        m.position.copy(baseFitPosition);
+        m.position.x += translateOffset.x;
+        m.position.y += translateOffset.y;
         m.scale.setScalar(baseScale * zoomFactor);
       }
       refreshStatus();
@@ -215,8 +247,12 @@ async function boot() {
   function statusForMode() {
     if (inXR) return 'AR · placed';
     const phys = `physics:${physicsMode}`;
-    if (mode === 'scale') return `mode: scale · ${phys} · ${zoomFactor.toFixed(2)}x`;
-    return `mode: ${mode} · ${phys}`;
+    const spin = physics.isContinuous() ? ' · spin' : '';
+    if (mode === 'scale') return `mode: scale · ${phys}${spin} · ${zoomFactor.toFixed(2)}x`;
+    if (mode === 'translate') {
+      return `mode: translate · ${phys}${spin} · x${translateOffset.x.toFixed(2)} y${translateOffset.y.toFixed(2)}`;
+    }
+    return `mode: ${mode} · ${phys}${spin}`;
   }
 
   function refreshStatus() {
@@ -241,43 +277,112 @@ async function boot() {
     refreshStatus();
   }
 
-  function resetAll() {
-    // Pinch index = reset everything: rotation, spin velocity, zoom.
-    physics.reset(viewer.getModel());
-    resetZoom();
+  function applyTranslate(axis, delta) {
+    const m = viewer.getModel();
+    if (!m) return;
+    translateOffset[axis] = clamp(translateOffset[axis] + delta, MIN_TRANSLATE, MAX_TRANSLATE);
+    m.position[axis] = baseFitPosition[axis] + translateOffset[axis];
     refreshStatus();
   }
 
-  // v1.5: only the pinch index gesture (Enter) reaches the Web App reliably.
-  // Pinch médio (would-be Escape) is intercepted by the system as 'back'
-  // and never lands here. So both reset and mode-cycle live on Enter:
-  //   single Enter → reset all (after MULTITAP_WINDOW_MS to disambiguate)
-  //   double Enter → cycle mode (instant, fires on 2nd tap)
+  function resetTranslate() {
+    const m = viewer.getModel();
+    if (!m) return;
+    translateOffset = { x: 0, y: 0 };
+    m.position.copy(baseFitPosition);
+  }
+
+  function applySnap(axis, sign) {
+    const m = viewer.getModel();
+    if (!m) return;
+    // Cancel any ongoing spin so the snap lands cleanly.
+    physics.reset(null);
+    m.rotation[axis] += SNAP_STEP * sign;
+  }
+
+  function applyRollImpulse(sign) {
+    physics.applyImpulse('z', ROLL_IMPULSE * sign);
+  }
+
+  function boostRoll() {
+    const vz = physics.getVelocity().z;
+    if (vz === 0) {
+      // No active spin — start one in the default direction.
+      applyRollImpulse(+1);
+      return;
+    }
+    // Multiply current Z velocity by ROLL_BOOST (preserve direction).
+    const target = vz * ROLL_BOOST;
+    physics.applyImpulse('z', target - vz);
+  }
+
+  function brakeRoll() {
+    const v = physics.getVelocity();
+    // Reset only Z, keep X/Y intact.
+    physics.applyImpulse('z', -v.z);
+  }
+
+  function resetAll() {
+    // Pinch index = reset everything: rotation, spin velocity, zoom, translate.
+    physics.reset(viewer.getModel());
+    resetZoom();
+    resetTranslate();
+    refreshStatus();
+  }
+
+  function toggleSpin() {
+    // Triple-pinch index = toggle continuous spin (no damping).
+    // Useful for "set it spinning and watch hands-free" once you tuned
+    // the rotation via swipes.
+    physics.toggleContinuous();
+    refreshStatus();
+  }
+
+  // v1.6: pinch indicador (Enter) carries three actions via tap count.
+  //   single Enter → reset all (after MULTITAP_WINDOW_MS)
+  //   double Enter → cycle mode (after TRIPLE_WINDOW_MS — small latency to allow triple)
+  //   triple Enter → toggle continuous spin (instant on 3rd tap)
+  // Pinch médio (would-be Escape) is intercepted by the system as 'back' and
+  // never lands here, so we can't use it.
   const enterTap = createMultitap({
     windowMs: MULTITAP_WINDOW_MS,
+    tripleWindowMs: TRIPLE_WINDOW_MS,
     onSingle: resetAll,
     onDouble: cycleMode,
+    onTriple: toggleSpin,
   });
 
   const input = createInput({
     onLeft: () => {
       if (mode === 'rotate') physics.applyImpulse('y', +IMPULSE_PER_TAP);
       else if (mode === 'scale') resetZoom();
+      else if (mode === 'translate') applyTranslate('x', -TRANSLATE_PER_TAP);
+      else if (mode === 'roll') applyRollImpulse(+1);
+      else if (mode === 'snap') applySnap('y', -1);
     },
     onRight: () => {
       if (mode === 'rotate') physics.applyImpulse('y', -IMPULSE_PER_TAP);
       else if (mode === 'scale') resetZoom();
+      else if (mode === 'translate') applyTranslate('x', +TRANSLATE_PER_TAP);
+      else if (mode === 'roll') applyRollImpulse(-1);
+      else if (mode === 'snap') applySnap('y', +1);
     },
     onUp: () => {
       if (mode === 'rotate') physics.applyImpulse('x', +IMPULSE_PER_TAP);
       else if (mode === 'scale') applyZoomImpulse(+SCALE_IMPULSE);
+      else if (mode === 'translate') applyTranslate('y', +TRANSLATE_PER_TAP);
+      else if (mode === 'roll') boostRoll();
+      else if (mode === 'snap') applySnap('x', +1);
     },
     onDown: () => {
       if (mode === 'rotate') physics.applyImpulse('x', -IMPULSE_PER_TAP);
       else if (mode === 'scale') applyZoomImpulse(-SCALE_IMPULSE);
+      else if (mode === 'translate') applyTranslate('y', -TRANSLATE_PER_TAP);
+      else if (mode === 'roll') brakeRoll();
+      else if (mode === 'snap') applySnap('x', -1);
     },
     onSelect: () => enterTap.tap(),
-    // onBack is wired but does nothing in v1.5 — the system intercepts the
+    // onBack is wired but does nothing in v1.6 — the system intercepts the
     // pinch médio (Escape) gesture before it can reach the Web App.
     onBack: () => {},
   });

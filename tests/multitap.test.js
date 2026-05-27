@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createMultitap } from '../src/multitap.js';
 
-describe('multitap', () => {
+describe('multitap (two-tier legacy)', () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -96,5 +96,133 @@ describe('multitap', () => {
     expect(() => m.tap()).not.toThrow();
     m.tap();
     expect(() => m.tap()).not.toThrow();
+  });
+});
+
+describe('multitap (three-tier with onTriple)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('fires onSingle after windowMs when only one tap arrives', () => {
+    const onSingle = vi.fn();
+    const onDouble = vi.fn();
+    const onTriple = vi.fn();
+    const m = createMultitap({
+      windowMs: 280,
+      tripleWindowMs: 180,
+      onSingle, onDouble, onTriple,
+    });
+    m.tap();
+    vi.advanceTimersByTime(281);
+    expect(onSingle).toHaveBeenCalledOnce();
+    expect(onDouble).not.toHaveBeenCalled();
+    expect(onTriple).not.toHaveBeenCalled();
+  });
+
+  it('fires onDouble after tripleWindowMs when 2nd tap arrives but no 3rd', () => {
+    const onSingle = vi.fn();
+    const onDouble = vi.fn();
+    const onTriple = vi.fn();
+    const m = createMultitap({
+      windowMs: 280,
+      tripleWindowMs: 180,
+      onSingle, onDouble, onTriple,
+    });
+    m.tap();
+    vi.advanceTimersByTime(100);
+    m.tap();
+    // Double should NOT fire immediately — needs to wait for triple window.
+    expect(onDouble).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(179);
+    expect(onDouble).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2);
+    expect(onDouble).toHaveBeenCalledOnce();
+    expect(onSingle).not.toHaveBeenCalled();
+    expect(onTriple).not.toHaveBeenCalled();
+  });
+
+  it('fires onTriple instantly on 3rd tap inside the triple window', () => {
+    const onSingle = vi.fn();
+    const onDouble = vi.fn();
+    const onTriple = vi.fn();
+    const m = createMultitap({
+      windowMs: 280,
+      tripleWindowMs: 180,
+      onSingle, onDouble, onTriple,
+    });
+    m.tap();
+    vi.advanceTimersByTime(100);
+    m.tap();
+    vi.advanceTimersByTime(100);
+    m.tap();
+    expect(onTriple).toHaveBeenCalledOnce();
+    expect(onDouble).not.toHaveBeenCalled();
+    expect(onSingle).not.toHaveBeenCalled();
+    // After triple fires, nothing should fire later.
+    vi.advanceTimersByTime(1000);
+    expect(onDouble).not.toHaveBeenCalled();
+    expect(onSingle).not.toHaveBeenCalled();
+  });
+
+  it('3rd tap just before triple-window boundary still counts as triple', () => {
+    const onDouble = vi.fn();
+    const onTriple = vi.fn();
+    const m = createMultitap({
+      windowMs: 280,
+      tripleWindowMs: 180,
+      onDouble, onTriple,
+    });
+    m.tap();
+    vi.advanceTimersByTime(50);
+    m.tap();
+    vi.advanceTimersByTime(179);
+    m.tap();
+    expect(onTriple).toHaveBeenCalledOnce();
+    expect(onDouble).not.toHaveBeenCalled();
+  });
+
+  it('3rd tap after triple window has fired double does NOT trigger triple', () => {
+    const onDouble = vi.fn();
+    const onTriple = vi.fn();
+    const m = createMultitap({
+      windowMs: 280,
+      tripleWindowMs: 180,
+      onDouble, onTriple,
+    });
+    m.tap();
+    vi.advanceTimersByTime(50);
+    m.tap();
+    vi.advanceTimersByTime(181);
+    expect(onDouble).toHaveBeenCalledOnce();
+    // Lone tap after double — should be treated as a new single sequence.
+    const onSingle = vi.fn();
+    m.tap();
+    expect(onSingle).not.toHaveBeenCalled();
+    expect(onTriple).not.toHaveBeenCalled();
+  });
+
+  it('cancel() prevents any pending fire', () => {
+    const onSingle = vi.fn();
+    const onDouble = vi.fn();
+    const onTriple = vi.fn();
+    const m = createMultitap({
+      windowMs: 280,
+      tripleWindowMs: 180,
+      onSingle, onDouble, onTriple,
+    });
+    m.tap();
+    m.tap();
+    expect(m.isPending()).toBe(true);
+    m.cancel();
+    expect(m.isPending()).toBe(false);
+    vi.advanceTimersByTime(1000);
+    expect(onSingle).not.toHaveBeenCalled();
+    expect(onDouble).not.toHaveBeenCalled();
+    expect(onTriple).not.toHaveBeenCalled();
   });
 });

@@ -35,8 +35,12 @@ const XRAY_FRAGMENT = `
   uniform vec3 uColor;
   uniform float uPower;
   void main() {
-    // Fresnel: 0 when facing the camera, →1 at grazing angles (silhouette).
-    float fres = pow(1.0 - max(dot(normalize(vNormal), normalize(vView)), 0.0), uPower);
+    // Fresnel via abs(dot): dark when a face points either TOWARD or AWAY
+    // from the camera, bright only at grazing angles (the silhouette). Using
+    // abs (not max(…,0)) keeps back-facing surfaces dark too, so the result
+    // is a hollow glowing shell instead of a solid fill — the "x-ray" look.
+    float ndv = abs(dot(normalize(vNormal), normalize(vView)));
+    float fres = pow(1.0 - ndv, uPower);
     // Premultiplied additive: bright rim, transparent center.
     gl_FragColor = vec4(uColor * fres, fres);
   }

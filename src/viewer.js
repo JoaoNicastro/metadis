@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { disposeObject } from './materials.js';
 
 const VIEWPORT = 600;
 
@@ -13,7 +14,9 @@ export function createViewer(container) {
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
   renderer.setSize(VIEWPORT, VIEWPORT);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  // Cap at 1.5 on the fixed 600x600 panel: ~40% fewer shaded fragments than 2.0
+  // with no visible loss at this size — headroom for the display modes + glow.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
   container.appendChild(renderer.domElement);
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.55));
@@ -22,6 +25,8 @@ export function createViewer(container) {
   scene.add(dir);
 
   let currentModel = null;
+  let mixer = null;     // THREE.AnimationMixer when the glb ships clips
+  let clips = [];       // gltf.animations
 
   function fitObjectToView(object3D) {
     // Normalize to identity transform before measuring so the box reflects local geometry.
@@ -44,7 +49,14 @@ export function createViewer(container) {
   function setCurrentModel(object3D) {
     if (currentModel) {
       scene.remove(currentModel);
+      // Free GPU memory for the model being replaced (geometry/materials/textures).
+      disposeObject(currentModel);
     }
+    if (mixer) {
+      mixer.stopAllAction();
+      mixer = null;
+    }
+    clips = [];
     currentModel = object3D;
     fitObjectToView(currentModel);
     scene.add(currentModel);
@@ -69,6 +81,12 @@ export function createViewer(container) {
         url,
         (gltf) => {
           setCurrentModel(gltf.scene);
+          // Capture animation clips (previously parsed then discarded). The
+          // mixer is built against the live scene graph; main.js drives it.
+          if (gltf.animations && gltf.animations.length) {
+            clips = gltf.animations;
+            mixer = new THREE.AnimationMixer(gltf.scene);
+          }
           resolve(gltf.scene);
         },
         undefined,
@@ -85,11 +103,26 @@ export function createViewer(container) {
     return currentModel;
   }
 
+  function getClips() {
+    return clips;
+  }
+
+  function getMixer() {
+    return mixer;
+  }
+
+  function updateMixer(dt) {
+    if (mixer) mixer.update(dt);
+  }
+
   return {
     loadModel,
     loadFallbackCube,
     render,
     getModel,
+    getClips,
+    getMixer,
+    updateMixer,
     scene,
     camera,
     renderer,

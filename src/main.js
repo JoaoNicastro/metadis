@@ -4,8 +4,10 @@ import { createViewer } from './viewer.js';
 import { createPhysics } from './physics.js';
 import { createInput } from './input.js';
 import { createMultitap } from './multitap.js';
+import { createHud } from './hud.js';
+import { createMaterialStyler, DISPLAY_STYLES } from './materials.js';
 
-const METADIS_VERSION = '1.6';
+const METADIS_VERSION = '1.7';
 const IMPULSE_PER_TAP = 2.5;
 const SCALE_IMPULSE = 2.5;       // exponent units per tap; 1 tap ≈ 15-20% size change before damping
 const SCALE_DAMPING = 0.985;     // matches rotation damping for consistent feel
@@ -36,10 +38,37 @@ const SNAP_STEP = Math.PI / 4;   // 45° per swipe; 8 swipes complete a full tur
 const MULTITAP_WINDOW_MS = 280;
 const TRIPLE_WINDOW_MS = 180;
 
+// Play mode (v1.7): glTF animation playback for rigged assets.
+const PLAY_SPEED_STEP = 0.25;
+const PLAY_SPEED_MAX = 3;
+
+// localStorage keys.
+const STYLE_KEY = 'metadis_style';
+const ONBOARD_KEY = 'metadis_onboarded';
+
+// What each swipe does in each mode — shown on the 4 HUD edge labels so the
+// frozen gesture vocabulary is always self-documenting.
+const ACTION_LABELS = {
+  rotate: { up: 'tilt ↑', down: 'tilt ↓', left: 'spin ←', right: 'spin →' },
+  scale: { up: 'bigger', down: 'smaller', left: 'reset', right: 'reset' },
+  display: { up: 'next style', down: 'prev style', left: 'prev style', right: 'next style' },
+  translate: { up: 'move ↑', down: 'move ↓', left: 'move ←', right: 'move →' },
+  roll: { up: 'boost', down: 'brake', left: 'roll ←', right: 'roll →' },
+  snap: { up: '+45° x', down: '−45° x', left: '−45° y', right: '+45° y' },
+  play: { up: 'faster', down: 'slower', left: 'prev clip', right: 'next clip' },
+};
+
 function clamp(v, min, max) {
   if (v > max) return max;
   if (v < min) return min;
   return v;
+}
+
+function safeGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+function safeSet(key, value) {
+  try { localStorage.setItem(key, value); } catch { /* localStorage may be blocked on-device */ }
 }
 
 function getModelUrl() {
@@ -158,6 +187,8 @@ async function boot() {
 
   const viewer = createViewer(container);
   const physics = createPhysics();
+  const hud = createHud(container);
+  const styler = createMaterialStyler();
 
   setStatus('loading model...');
   const url = getModelUrl();
@@ -180,33 +211,48 @@ async function boot() {
   const baseScale = model ? model.scale.x : 1;
   const baseFitPosition = model ? model.position.clone() : new THREE.Vector3();
 
-  // Five active modes (cycle with double pinch index):
+  // Active modes (cycle with double pinch index):
   //   rotate    — ←→ apply yaw impulse, ↑↓ apply pitch impulse. Damping.
   //   scale     — ↑↓ apply scale impulse, ←→ reset zoom.
+  //   display   — cycle render style: solid → wireframe → x-ray glow → normals.
   //   translate — swipes shift model on X/Y; ←/→ = ∓X, ↑/↓ = ±Y. Clamped to viewport.
   //   roll      — ←/→ roll around Z, ↑ boost current spin, ↓ brake to stop.
   //   snap      — each swipe rotates instantly by 45° (no physics).
+  //   play      — APPENDED only when the .glb ships animation clips; ←→ clip,
+  //               ↑↓ speed (↓ to 0 = pause).
   // 'explode' slot reserved for a future model-aware partition mode.
   //
   // GESTURE NOTES (verified empirically on Meta Ray-Ban Display 2026-05-26):
   // - Pinch polegar+médio is intercepted by the system as 'back' navigation
   //   and DOES NOT deliver a KeyboardEvent (Escape) to the Web App.
   // - The 'onBack' handler is still wired in case a future firmware fixes
-  //   this, but no controls depend on it in v1.6.
+  //   this, but no controls depend on it.
   // - Pinch polegar+indicador (single + long press emit the same Enter; long
   //   press is cosmetic) is the only reliable discrete gesture for click.
-  //   v1.6 uses single/double/triple counts of this gesture (see enterTap).
+  //   We use single/double/triple counts of this gesture (see enterTap).
   // - Swipes 4-direction deliver Arrow keys cleanly.
   //
   // IMU/DeviceOrientation is intentionally NOT wired into the model.
   // On the Meta Ray-Ban Display, DeviceOrientation reflects the HEAD (glasses
   // IMU), not the wrist. Native wrist tracking would require the Wearables
   // Device Access Toolkit (Swift/Kotlin), not Web Apps.
-  const MODE_CYCLE = ['rotate', 'scale', 'translate', 'roll', 'snap'];
+  const modeCycle = ['rotate', 'scale', 'display', 'translate', 'roll', 'snap'];
+  if (viewer.getClips().length > 0) modeCycle.push('play');
   let mode = 'rotate';
   let zoomFactor = 1;
   let zoomVel = 0;
   let translateOffset = { x: 0, y: 0 };
+
+  // Play-mode state (only meaningful when modeCycle includes 'play').
+  let clipIndex = 0;
+  let playSpeed = 1;
+  let action = null;
+
+  // Restore the display style the user left last time (persisted per device).
+  const savedStyle = safeGet(STYLE_KEY);
+  if (model && savedStyle && DISPLAY_STYLES.includes(savedStyle) && savedStyle !== 'solid') {
+    styler.apply(model, savedStyle);
+  }
 
   // Damped: applyImpulse + physics.step damp → cube decelerates to rest.
   // Frozen: every step zeroes velocity → cube stops on each impulse end.
@@ -244,25 +290,81 @@ async function boot() {
     },
   });
 
+  function clipName() {
+    const clips = viewer.getClips();
+    if (!clips.length) return '—';
+    const c = clips[clipIndex];
+    return c && c.name ? c.name : `clip ${clipIndex + 1}`;
+  }
+
+  // Short mode-specific value shown in the HUD sub-line.
+  function modeExtra() {
+    if (mode === 'scale') return `${zoomFactor.toFixed(2)}x`;
+    if (mode === 'display') return styler.getStyle();
+    if (mode === 'translate') return `x${translateOffset.x.toFixed(1)} y${translateOffset.y.toFixed(1)}`;
+    if (mode === 'play') return `${clipName()} · ${playSpeed === 0 ? 'paused' : playSpeed.toFixed(2) + 'x'}`;
+    return physics.isContinuous() ? 'spin' : '';
+  }
+
   function statusForMode() {
     if (inXR) return 'AR · placed';
     const phys = `physics:${physicsMode}`;
     const spin = physics.isContinuous() ? ' · spin' : '';
-    if (mode === 'scale') return `mode: scale · ${phys}${spin} · ${zoomFactor.toFixed(2)}x`;
-    if (mode === 'translate') {
-      return `mode: translate · ${phys}${spin} · x${translateOffset.x.toFixed(2)} y${translateOffset.y.toFixed(2)}`;
-    }
-    return `mode: ${mode} · ${phys}${spin}`;
+    const extra = modeExtra();
+    return `mode: ${mode} · ${phys}${spin}${extra && mode !== 'rotate' ? ' · ' + extra : ''}`;
   }
 
   function refreshStatus() {
     setStatus(statusForMode());
+    if (!inXR) {
+      hud.setMode({
+        name: mode,
+        index: modeCycle.indexOf(mode),
+        total: modeCycle.length,
+        edges: ACTION_LABELS[mode] || {},
+        extra: modeExtra(),
+      });
+    }
   }
 
   function cycleMode() {
-    const next = MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length];
+    const next = modeCycle[(modeCycle.indexOf(mode) + 1) % modeCycle.length];
     mode = next;
     zoomVel = 0;
+    if (mode === 'play' && !action) playClip(0);
+    hud.flash();
+    refreshStatus();
+  }
+
+  // display mode: step the render style and persist it for next launch.
+  function cycleStyle(dir) {
+    const m = viewer.getModel();
+    if (!m) return;
+    if (dir > 0) styler.next(m); else styler.prev(m);
+    safeSet(STYLE_KEY, styler.getStyle());
+    hud.flash();
+    refreshStatus();
+  }
+
+  // play mode: drive the AnimationMixer built from the .glb clips.
+  function playClip(i) {
+    const clips = viewer.getClips();
+    const mixer = viewer.getMixer();
+    if (!clips.length || !mixer) return;
+    clipIndex = ((i % clips.length) + clips.length) % clips.length;
+    if (action) action.stop();
+    action = mixer.clipAction(clips[clipIndex]);
+    action.reset();
+    action.timeScale = playSpeed;
+    action.play();
+    hud.flash();
+    refreshStatus();
+  }
+
+  function setPlaySpeed(delta) {
+    playSpeed = clamp(playSpeed + delta, 0, PLAY_SPEED_MAX);
+    if (action) action.timeScale = playSpeed;
+    hud.flash();
     refreshStatus();
   }
 
@@ -327,6 +429,7 @@ async function boot() {
     physics.reset(viewer.getModel());
     resetZoom();
     resetTranslate();
+    hud.flash();
     refreshStatus();
   }
 
@@ -335,6 +438,7 @@ async function boot() {
     // Useful for "set it spinning and watch hands-free" once you tuned
     // the rotation via swipes.
     physics.toggleContinuous();
+    hud.flash();
     refreshStatus();
   }
 
@@ -352,41 +456,72 @@ async function boot() {
     onTriple: toggleSpin,
   });
 
+  // First-run onboarding: show the gesture card until the user's first input,
+  // then swallow that one gesture (so they don't accidentally fire an action)
+  // and never show it again. ?tutorial=1 replays it regardless of the flag.
+  const tutorialReplay = new URLSearchParams(window.location.search).get('tutorial') === '1';
+  let onboarding = tutorialReplay || !safeGet(ONBOARD_KEY);
+  if (onboarding) hud.showOnboard();
+  function dismissOnboard() {
+    if (!onboarding) return false;
+    onboarding = false;
+    hud.hideOnboard();
+    safeSet(ONBOARD_KEY, '1');
+    refreshStatus();
+    return true; // tells the caller to swallow this gesture
+  }
+
   const input = createInput({
     onLeft: () => {
+      if (dismissOnboard()) return;
       if (mode === 'rotate') physics.applyImpulse('y', +IMPULSE_PER_TAP);
       else if (mode === 'scale') resetZoom();
+      else if (mode === 'display') cycleStyle(-1);
       else if (mode === 'translate') applyTranslate('x', -TRANSLATE_PER_TAP);
       else if (mode === 'roll') applyRollImpulse(+1);
       else if (mode === 'snap') applySnap('y', -1);
+      else if (mode === 'play') playClip(clipIndex - 1);
     },
     onRight: () => {
+      if (dismissOnboard()) return;
       if (mode === 'rotate') physics.applyImpulse('y', -IMPULSE_PER_TAP);
       else if (mode === 'scale') resetZoom();
+      else if (mode === 'display') cycleStyle(+1);
       else if (mode === 'translate') applyTranslate('x', +TRANSLATE_PER_TAP);
       else if (mode === 'roll') applyRollImpulse(-1);
       else if (mode === 'snap') applySnap('y', +1);
+      else if (mode === 'play') playClip(clipIndex + 1);
     },
     onUp: () => {
+      if (dismissOnboard()) return;
       if (mode === 'rotate') physics.applyImpulse('x', +IMPULSE_PER_TAP);
       else if (mode === 'scale') applyZoomImpulse(+SCALE_IMPULSE);
+      else if (mode === 'display') cycleStyle(+1);
       else if (mode === 'translate') applyTranslate('y', +TRANSLATE_PER_TAP);
       else if (mode === 'roll') boostRoll();
       else if (mode === 'snap') applySnap('x', +1);
+      else if (mode === 'play') setPlaySpeed(+PLAY_SPEED_STEP);
     },
     onDown: () => {
+      if (dismissOnboard()) return;
       if (mode === 'rotate') physics.applyImpulse('x', -IMPULSE_PER_TAP);
       else if (mode === 'scale') applyZoomImpulse(-SCALE_IMPULSE);
+      else if (mode === 'display') cycleStyle(-1);
       else if (mode === 'translate') applyTranslate('y', -TRANSLATE_PER_TAP);
       else if (mode === 'roll') brakeRoll();
       else if (mode === 'snap') applySnap('x', -1);
+      else if (mode === 'play') setPlaySpeed(-PLAY_SPEED_STEP);
     },
-    onSelect: () => enterTap.tap(),
-    // onBack is wired but does nothing in v1.6 — the system intercepts the
-    // pinch médio (Escape) gesture before it can reach the Web App.
+    onSelect: () => {
+      if (dismissOnboard()) return;
+      enterTap.tap();
+    },
+    // onBack is wired but does nothing — the system intercepts the pinch médio
+    // (Escape) gesture before it can reach the Web App.
     onBack: () => {},
   });
   input.attach();
+  refreshStatus(); // paint the HUD mode map on boot
 
   let last = performance.now();
 
@@ -407,6 +542,9 @@ async function boot() {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     const m = viewer.getModel();
+
+    // Advance glTF animation (no-op when the model has no clips or is paused).
+    viewer.updateMixer(dt);
 
     if (frame && xr) {
       xr.tick(frame);

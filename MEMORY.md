@@ -1,6 +1,6 @@
 # Metadis — Memory Handoff
 
-> Cola isso num chat novo (sem contexto prévio) pra trazer o próximo assistente up to speed em 2 minutos. Atualizado em **2026-05-26 · v1.6**.
+> Cola isso num chat novo (sem contexto prévio) pra trazer o próximo assistente up to speed em 2 minutos. Atualizado em **2026-05-29 · v1.7**.
 
 ---
 
@@ -10,7 +10,7 @@
 
 - **Live:** https://metadis.surge.sh
 - **Repo:** https://github.com/JoaoNicastro/metadis
-- **Versão atual:** 1.6
+- **Versão atual:** 1.7
 - **Owner:** João (jnjojonic@gmail.com)
 
 ---
@@ -35,31 +35,37 @@ Estas verdades são **caras** — cada uma custou um round-trip de design+deploy
 
 ---
 
-## Vocabulário de controles (v1.6)
+## Vocabulário de controles (v1.7)
 
-**5 modos no cycle** (cada modo reinterpreta as 4 setas): `rotate` → `scale` → `translate` → `roll` → `snap` → volta. Avança com double pinch indicador.
+**6 modos no cycle** (+`play` condicional): `rotate` → `scale` → `display` → `translate` → `roll` → `snap` → (`play` se o .glb tiver animação) → volta. Avança com double pinch indicador. **HUD visível** mostra o modo atual grande no centro, índice (ex: `3/6`), e o que cada uma das 4 setas faz nas bordas — então não precisa decorar.
 
-| Gesto Neural Band | Tecla | Ação em `rotate` | Ação em `scale` | Ação em `translate` | Ação em `roll` | Ação em `snap` |
-| --- | --- | --- | --- | --- | --- | --- |
-| Swipe ← | `ArrowLeft` | yaw + impulse | reset zoom | mover −X | roll horário | snap −45° Y |
-| Swipe → | `ArrowRight` | yaw − impulse | reset zoom | mover +X | roll anti-horário | snap +45° Y |
-| Swipe ↑ | `ArrowUp` | pitch + impulse | zoom + | mover +Y | boost spin Z atual (×1.6) | snap +45° X |
-| Swipe ↓ | `ArrowDown` | pitch − impulse | zoom − | mover −Y | brake spin Z (zera) | snap −45° X |
+Ação de cada seta por modo:
+
+- **rotate** — ← yaw+ · → yaw− · ↑ pitch+ · ↓ pitch− (com damping/momentum)
+- **scale** — ↑ aumenta · ↓ diminui · ←/→ reset zoom
+- **display** — ←/↓ estilo anterior · →/↑ próximo estilo. Cicla `solid → wireframe → x-ray (fresnel glow) → normals`. **Persiste em localStorage** (`metadis_style`). É o upgrade visual "holograma" pro display aditivo.
+- **translate** — ← −X · → +X · ↑ +Y · ↓ −Y (clamp no viewport)
+- **roll** — ←/→ roll no eixo Z · ↑ boost spin atual (×1.6) · ↓ brake (zera Z)
+- **snap** — cada seta gira instantâneo 45° (sem física): ←/→ eixo Y, ↑/↓ eixo X
+- **play** (só aparece com clips) — ←/→ clip anterior/próximo · ↑/↓ velocidade (↓ até 0 = pause). AnimationMixer roda no loop.
 
 **Pinch indicador** (único gesto pinch confiável — gera `Enter` keydown):
 
 | Quantidade rápida | Latência | Ação |
 | --- | --- | --- |
 | 1 tap | 280ms | Reset total: rotação + zoom + translate + spin |
-| 2 taps em até 280ms | +180ms | Cicla modo (ordem acima) |
+| 2 taps em até 280ms | +180ms | Cicla modo (ordem acima) + flash no HUD |
 | 3 taps em até 280+180ms | 0 (instantâneo) | **Toggle spin contínuo** (rotação sem damping) |
+
+Primeiro launch mostra um **card de onboarding** (setas + pinch); o 1º gesto fecha ele (e é engolido, não dispara ação). Gated por localStorage `metadis_onboarded`; `?tutorial=1` mostra de novo.
 
 **URL params:**
 
 | Param | Efeito |
 | --- | --- |
 | `?physics=frozen` | Override: nenhum impulso carrega momentum (zerado por frame) |
-| `?model=<url>` | Carrega `.glb` arbitrário de URL HTTPS |
+| `?model=<url>` | Carrega `.glb` arbitrário de URL HTTPS (use um rigado pra ver o modo `play`) |
+| `?tutorial=1` | Re-exibe o card de onboarding |
 | `?imu=off` | (legado, IMU já não é usado desde v1.5) |
 
 **Gestos que NÃO funcionam (não tente):**
@@ -67,7 +73,9 @@ Estas verdades são **caras** — cada uma custou um round-trip de design+deploy
 - Pinch + girar pulso (vira controle de volume do sistema)
 - Cabeça → cubo (não é controle, é só observação de mundo se você adicionar modo intencional)
 - Custom gestures arbitrários — Web App SDK oficial confirma: só estes 6 keydowns (4 setas + Enter + Escape, e Escape é absorvido)
-- Combos de setas opostas (←→ rápido) — descartado em v1.6 design: adicionar 200ms+ de latência em cada swipe pra detectar pair quebra a responsividade do `rotate`/`scale`. Modos extras cobrem a necessidade de vocabulário.
+- Combos de setas opostas (←→ rápido) — adicionar 200ms+ de latência em cada swipe pra detectar pair quebra a responsividade do `rotate`/`scale`. Modos extras cobrem a necessidade de vocabulário.
+
+> ⚠️ **Mode-count smell:** 6-7 modos ciclados às cegas por double-pinch é muito. O HUD visível (índice `n/total` + flash) é a mitigação atual; o próximo passo recomendado é o **mode-ring picker** (rank 9 da pesquisa) — abre um anel visível dos modos no double-pinch em vez de ciclar cego.
 
 ---
 
@@ -76,15 +84,18 @@ Estas verdades são **caras** — cada uma custou um round-trip de design+deploy
 ```
 metadis/
 ├── src/
-│   ├── viewer.js    — Three.js scene, camera, lights, GLTFLoader. SEM mudança desde v1.0.
-│   ├── physics.js   — angular velocity + damping + reset + toggleContinuous (usado em v1.6 pelo triple-pinch). PURO, testado.
+│   ├── viewer.js    — Three.js scene, camera, lights, GLTFLoader. v1.7: dispose-on-swap
+│   │                  (no VRAM leak), pixelRatio cap 1.5, AnimationMixer (getClips/getMixer/updateMixer).
+│   ├── physics.js   — angular velocity + damping + reset + toggleContinuous (triple-pinch). PURO, testado.
 │   ├── input.js     — keydown → callback dispatch. Mapeia 4 setas + Enter + Escape.
 │   ├── imu.js       — DeviceOrientation com EMA smoothing + dead zone. PRESENTE mas
 │   │                  NÃO USADO em v1.5+ (head, não pulso). Comentário explica por quê.
-│   ├── multitap.js  — detector genérico single/double/triple. Pure JS, timer-based.
-│   │                  v1.6 estendeu pra 3-tier opcional (passa onTriple).
-│   └── main.js      — bootstrap, mode state (5 modos), HUD, render loop, glue de tudo.
-├── tests/           — vitest + jsdom. 45 testes.
+│   ├── multitap.js  — detector genérico single/double/triple. Pure JS, timer-based (3-tier opcional).
+│   ├── materials.js — NOVO v1.7. Display styles (wireframe / x-ray fresnel / normals) +
+│   │                  createMaterialStyler (stash/restore materiais) + disposeObject. Testado.
+│   ├── hud.js       — NOVO v1.7. Overlay DOM aditivo: mode glyph + edge hints + flash + onboarding. Testado (jsdom).
+│   └── main.js      — bootstrap, mode state (6 modos +play), HUD wiring, onboarding, render loop, glue.
+├── tests/           — vitest + jsdom. 66 testes (materials 14, hud 7, + existentes).
 ├── public/
 │   ├── fallback.glb — Khronos Box (~1.6KB), usado se nenhum ?model= passado
 │   ├── CNAME        — domínio do Surge.sh (preserva em re-deploys)
@@ -159,7 +170,7 @@ O device do Meta Display **segura HTML cacheado de forma agressiva**, mesmo com 
 1. Meta AI app no celular pareado → Settings → Developer Mode → enable
 2. Add a Web App → cole `https://metadis.surge.sh`
 3. Nos óculos: menu Web Apps → Metadis Viewer
-4. HUD em cima à esquerda confirma a versão (ex: `Versão 1.5`)
+4. HUD em cima à esquerda confirma a versão (ex: `Versão 1.7`)
 
 **Versões mínimas:** glasses `v125+`, Meta AI app `v272+`.
 
@@ -171,7 +182,8 @@ O device do Meta Display **segura HTML cacheado de forma agressiva**, mesmo com 
 - **v1.3 (revertido):** tentou grab contínuo (single pinch = agarra, pulso vira input 1:1). Falhou no device porque (a) IMU é cabeça, (b) pinch+rotação = volume. PR #2.
 - **v1.4:** revert do grab. Modos `rotate` e `scale` discretos. Pinch médio (Escape) ainda era usado pra cycle/toggle. PR #5.
 - **v1.5:** descobriu que pinch médio não chega como `Escape` no Web App (sistema absorve). Tudo migrou pra pinch indicador (single = reset, double = cycle). Toggle de física virou URL param. PR #6.
-- **v1.6 (atual):** vocabulário expandido sem violar restrições da plataforma. Multitap estendido pra 3-tier (triple-pinch = toggle spin contínuo). 3 novos modos no cycle: `translate` (move XY), `roll` (spin Z + boost/brake), `snap` (45° steps sem física). Total 5 modos. Sem combos (trade-off de latência ruim). PR pendente.
+- **v1.6:** vocabulário expandido sem violar restrições. Multitap 3-tier (triple-pinch = toggle spin contínuo). 3 novos modos: `translate` (move XY), `roll` (spin Z + boost/brake), `snap` (45° steps). Total 5 modos. PR #8.
+- **v1.7 (atual):** saída de um **workflow de pesquisa de 11 agentes** (mercado Meta Display web apps → backlog rankeado em `docs/superpowers/research/2026-05-29-...md`). 5 melhorias: (1) **display mode** com 4 estilos de render holográficos pro display aditivo (solid/wireframe/x-ray fresnel/normals, persistido), (2) **HUD visível** (mode glyph central + hints nas bordas + flash de brilho), (3) **onboarding** de 1ª vez (localStorage), (4) **perf hardening** (dispose-on-swap + pixelRatio 1.5), (5) **play mode** (animação glTF, condicional a clips). Novos módulos `materials.js` + `hud.js`. 66 testes. Verificado no preview.
 
 ---
 
@@ -211,7 +223,9 @@ Quando trabalhar nesse repo, as skills relevantes são:
 
 ## Próximos passos plausíveis (não comprometido)
 
-- **Modo `explode`:** separar partes do `.glb` em camadas (slot já existia em `MODE_CYCLE`; v1.6 não preencheu). Requer modelos com hierarquia significativa.
+- **Mode-ring picker (recomendado próximo):** com 6-7 modos, ciclar cego cansa. Rank 9 da pesquisa: double-pinch abre um anel visível dos modos, double-pinch gira a seleção, single confirma. Tira o "qual modo é esse?".
+- **Modo `explode`:** separar partes do `.glb` em camadas (slot reservado, ainda não preenchido). Requer modelos com hierarquia significativa. Rank 7 da pesquisa.
+- **Selective bloom (`?bloom=1`):** UnrealBloomPass nos pixels brilhantes = glow holográfico real no aditivo. Rank 10, esforço L, gated por FPS check no device.
 - **Wrist Writing** (Meta announced 2026): se Meta expor letras traçadas como `KeyboardEvent`, dá pra mapear comandos (ex: traçar "i" → invert). API status incerto.
 - **Modo "look-to-aim" intencional:** usar head IMU como controle deliberado em um modo isolado (não bias). Cubo "world-locked" enquanto você anda em volta dele.
 - **Migrar pro Web Apps SDK oficial (Mai/2026):** instalar [meta-wearables-webapp](https://github.com/facebookincubator/meta-wearables-webapp) skill no Claude Code, adotar classe `.focusable` se houver UI navegável (atualmente só 1 canvas + HUD), e usar `/test-on-device` + `/publish-to-vercel` do plugin. Não muda gestos (mesmas 6 teclas), mas alinha com canal de distribuição oficial e tooling. Build atual (153KB gzip) já atende performance budgets.
@@ -226,5 +240,6 @@ Em ordem de prioridade:
 1. `MEMORY.md` (este arquivo)
 2. `src/main.js` — entender o estado atual de modos/HUD/glue
 3. `docs/superpowers/specs/2026-05-26-v1.4-platform-correction.md` — postmortem com vocabulário final
-4. `README.md` — instalação + comandos
-5. `package.json` — deps mínimas (three, vite, vitest, jsdom)
+4. `docs/superpowers/research/2026-05-29-metadis-improvement-research.md` — backlog rankeado de 19 ideias (o que construir depois)
+5. `README.md` — instalação + comandos
+6. `package.json` — deps mínimas (three, vite, vitest, jsdom)

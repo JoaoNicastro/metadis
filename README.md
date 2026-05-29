@@ -55,36 +55,63 @@ Workflow em `.github/workflows/deploy.yml` faz build com `GITHUB_PAGES=1` e publ
 
 Versões mínimas: Meta Ray-Ban Display `v125+`, Meta AI app `v272+`.
 
-## Controles
+## Controles (v1.7)
 
-| Gesto Neural Band                | Tecla equivalente            | Ação                                  |
-| -------------------------------- | ---------------------------- | ------------------------------------- |
-| Swipe esquerda                   | ArrowLeft                    | Impulso angular Y (+)                 |
-| Swipe direita                    | ArrowRight                   | Impulso angular Y (−)                 |
-| Swipe cima                       | ArrowUp                      | Impulso angular X (+)                 |
-| Swipe baixo                      | ArrowDown                    | Impulso angular X (−)                 |
-| Pinça polegar+indicador          | Enter                        | Reset (zera rotação e velocidade)     |
-| **Duplo** pinça polegar+indicador| Enter Enter (<400ms)         | Recalibra zero do head IMU            |
-| Pinça polegar+médio              | Escape                       | Alterna spin contínuo / damping       |
-| **Duplo** pinça polegar+médio    | Escape Escape (<400ms)       | Liga/desliga head IMU                 |
-| Inclinar cabeça (qualquer eixo)  | (DeviceOrientation contínuo) | Rotaciona modelo proporcional ao tilt |
+Só dois gestos chegam ao Web App: **4 swipes** (setas) e **pinça polegar+indicador** (`Enter`). Pinça polegar+médio é absorvida pelo sistema como "back" e nunca chega. O HUD mostra o modo atual no centro e o que cada seta faz nas bordas.
 
-**Twist (pinça + rotação do pulso) não está disponível pro Web App** — a Meta reserva esse gesto pro controle de volume do sistema. O equivalente contínuo é o head IMU.
+**6 modos** ciclados por **duplo pinch** (+`play` aparece só em modelos com animação):
 
-Cada impulso de swipe adiciona `IMPULSE_PER_TAP = 2.5 rad/s` ao eixo. Velocidade angular decai por `DAMPING = 0.985` por frame (~85% retida) — objeto para perceptualmente em ~3-4s. Head IMU usa dead zone de 1.5° e gain 0.9, somando à física. Pra desabilitar IMU via URL: `?imu=off`.
+| Modo        | ← / →                  | ↑ / ↓                          |
+| ----------- | ---------------------- | ------------------------------ |
+| `rotate`    | yaw ∓                  | pitch ±                        |
+| `scale`     | reset zoom             | aumenta / diminui              |
+| `display`   | estilo anterior/próximo | estilo próximo/anterior        |
+| `translate` | move X ∓               | move Y ±                       |
+| `roll`      | roll Z ±               | boost spin / brake             |
+| `snap`      | −45° / +45° (eixo Y)   | +45° / −45° (eixo X)           |
+| `play`*     | clip anterior/próximo  | velocidade ± (↓ a 0 = pause)   |
+
+\* só quando o `.glb` tem clips de animação.
+
+**Pinça polegar+indicador** (gera `Enter`):
+
+| Contagem        | Ação                                              |
+| --------------- | ------------------------------------------------- |
+| 1 toque         | Reset total (rotação + zoom + translate + spin)   |
+| 2 toques (<280ms) | Cicla modo                                       |
+| 3 toques (<+180ms) | Liga/desliga spin contínuo (sem damping)       |
+
+**Display modes** (`display`): `solid → wireframe → x-ray (fresnel glow) → normals`. Bright-on-black lê muito melhor no display aditivo. A escolha persiste em `localStorage`.
+
+**Onboarding:** primeira vez mostra um card com as setas + pinça; o 1º gesto fecha (e é engolido). `?tutorial=1` mostra de novo.
+
+**Não funciona** (limitação da plataforma): pinça polegar+médio, pinça+twist (vira volume), tracking de pulso, head IMU no modelo. Detalhes em [MEMORY.md](MEMORY.md).
+
+### URL params
+
+| Param              | Efeito                                                 |
+| ------------------ | ------------------------------------------------------ |
+| `?model=<url-glb>` | Carrega `.glb` de uma URL HTTPS (rigado → vê `play`)   |
+| `?physics=frozen`  | Sem momentum (cada impulso para na hora)               |
+| `?tutorial=1`      | Re-exibe o onboarding                                  |
 
 ## Arquivos
 
-- `src/viewer.js` — Three.js scene, camera, lights, GLTFLoader
+- `src/viewer.js` — Three.js scene, GLTFLoader, dispose-on-swap, AnimationMixer
 - `src/physics.js` — angular velocity, applyImpulse, step, damping (módulo puro)
 - `src/input.js` — keydown → callbacks
-- `src/imu.js` — DeviceOrientation → continuous head-tilt rotation bias
-- `src/main.js` — bootstrap e cola
+- `src/multitap.js` — detector single/double/triple tap (módulo puro)
+- `src/materials.js` — display styles (wireframe / x-ray fresnel / normals) + dispose
+- `src/hud.js` — overlay aditivo: mode glyph, edge hints, flash, onboarding
+- `src/imu.js` — DeviceOrientation (head) — presente mas não usado no modelo (ver MEMORY.md)
+- `src/main.js` — bootstrap, modos, e cola
 - `public/fallback.glb` — modelo default (Khronos Box, ~1.6KB)
 - `public/CNAME` — domínio do Surge.sh
-- `public/spike/index.html` — página de teste de dispositivo (WebGL + key + IMU logger)
+- `public/spike/index.html` — página de teste de dispositivo
 
-## Spec e plano
+## Spec, pesquisa e contexto
 
-- [Spec](docs/superpowers/specs/2026-05-25-meta-display-3d-viewer-design.md)
-- [Plan](docs/superpowers/plans/2026-05-25-meta-display-3d-viewer.md)
+- [MEMORY.md](MEMORY.md) — handoff completo de contexto (realidade da plataforma, gestos, pitfalls)
+- [Spec inicial](docs/superpowers/specs/2026-05-25-meta-display-3d-viewer-design.md)
+- [Postmortem v1.4](docs/superpowers/specs/2026-05-26-v1.4-platform-correction.md)
+- [Pesquisa de melhorias (backlog rankeado)](docs/superpowers/research/2026-05-29-metadis-improvement-research.md)

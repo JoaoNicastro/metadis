@@ -45,4 +45,14 @@ jobs:
         env:
           SURGE_LOGIN: ${{ secrets.SURGE_LOGIN }}
           SURGE_TOKEN: ${{ secrets.SURGE_TOKEN }}
-        run: npx --yes surge dist/ metadis.surge.sh
+        # surge's publish step occasionally hangs then reports "Deployment did
+        # not succeed" even though auth + upload worked. Retry up to 3x before
+        # failing the job.
+        run: |
+          for i in 1 2 3; do
+            npx --yes surge dist/ metadis.surge.sh && exit 0
+            echo "surge attempt $i failed; retrying in 15s..."
+            sleep 15
+          done
+          echo "surge failed after 3 attempts"
+          exit 1
